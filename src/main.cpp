@@ -181,10 +181,76 @@ uint32_t Fnv(const void* data, size_t n) {
     return h;
 }
 
+// The registers a shader declares (from its bytecode), so a capture lists only what each pass
+// reads and writes. RE Engine binds one large table (t0..t127) and bindless buffer tables to
+// every pass; without this the capture is mostly unused slots.
+struct Decl {
+    char cls;  // 't', 'u', 'b' or 's'
+    uint32_t space, lo, hi;
+};
+
+std::unordered_map<uint32_t, std::vector<Decl>> g_decls;  // shader id -> registers (g_pipeMutex)
+
+// DXIL keeps its bindings in the PSV0 part, SM 5.x DXBC in RDEF.
+std::vector<Decl> ParseDecls(const uint8_t* p, size_t n) {
+    std::vector<Decl> out;
+    auto u32 = [&](size_t off) -> uint32_t {
+        uint32_t v = 0;
+        if (off + 4 <= n) memcpy(&v, p + off, 4);
+        return v;
+    };
+    if (n < 32 || memcmp(p, "DXBC", 4) != 0) return out;
+    const uint32_t parts = u32(28);
+    for (uint32_t i = 0; i < parts && 32 + i * 4 + 4 <= n; ++i) {
+        const size_t part = u32(32 + i * 4);
+        if (part + 8 > n) continue;
+        const size_t data = part + 8, size = u32(part + 4);
+        if (data + size > n) continue;
+        if (memcmp(p + part, "PSV0", 4) == 0) {
+            const uint32_t infoSize = u32(data);
+            size_t at = data + 4 + infoSize;
+            const uint32_t count = u32(at);
+            if (!count) continue;
+            const uint32_t stride = u32(at + 4);
+            at += 8;
+            for (uint32_t k = 0; k < count && at + 16 <= data + size; ++k, at += stride) {
+                const uint32_t type = u32(at);  // 1 sampler, 2 CBV, 3-5 SRV, 6-9 UAV
+                const char cls = type == 1 ? 's' : type == 2 ? 'b' : type <= 5 ? 't' : 'u';
+                out.push_back({cls, u32(at + 4), u32(at + 8), u32(at + 12)});
+            }
+        } else if (memcmp(p + part, "RDEF", 4) == 0) {
+            const uint32_t count = u32(data + 8), off = u32(data + 12);
+            const uint32_t version = u32(data + 16);
+            const bool sm51 = ((version >> 8) & 0xff) == 5 && (version & 0xff) == 1;
+            const uint32_t stride = sm51 ? 40 : 32;
+            for (uint32_t k = 0; k < count; ++k) {
+                const size_t at = data + off + k * stride;
+                if (at + stride > data + size) break;
+                const uint32_t type = u32(at + 4);  // D3D_SHADER_INPUT_TYPE
+                const char cls = type == 0 ? 'b' : type == 3 ? 's' : (type == 4 || type >= 6) && type != 7 ? 'u' : 't';
+                const uint32_t lo = u32(at + 20), cnt = u32(at + 24);
+                out.push_back({cls, sm51 ? u32(at + 32) : 0, lo, cnt ? lo + cnt - 1 : UINT32_MAX});
+            }
+        }
+    }
+    return out;
+}
+
 uint32_t ShaderHash(const pipeline_subobject& s) {
     if (!s.data) return 0;
     const shader_desc& d = *static_cast<const shader_desc*>(s.data);
-    return d.code && d.code_size ? Fnv(d.code, d.code_size) : 0;
+    if (!d.code || !d.code_size) return 0;
+    const uint32_t id = Fnv(d.code, d.code_size);
+    std::vector<Decl> decls = ParseDecls(static_cast<const uint8_t*>(d.code), d.code_size);
+    std::lock_guard<std::mutex> lock(g_pipeMutex);
+    g_decls[id] = std::move(decls);
+    return id;
+}
+
+const std::vector<Decl>* Decls(uint32_t id) {  // the vectors are never erased, so the pointer stays valid
+    std::lock_guard<std::mutex> lock(g_pipeMutex);
+    auto it = g_decls.find(id);
+    return it == g_decls.end() || it->second.empty() ? nullptr : &it->second;
 }
 
 void OnInitPipeline(device*, pipeline_layout, uint32_t count, const pipeline_subobject* subobjects, pipeline pipe) {
@@ -196,6 +262,13 @@ void OnInitPipeline(device*, pipeline_layout, uint32_t count, const pipeline_sub
             case pipeline_subobject_type::vertex_shader: ids.vs = ShaderHash(subobjects[i]); break;
             default: break;
         }
+    }
+    static std::atomic<int> logged{0};
+    if (logged < 4 && (ids.cs || ids.ps)) {
+        ++logged;
+        const uint32_t id = ids.cs ? ids.cs : ids.ps;
+        const std::vector<Decl>* d = Decls(id);
+        Log("pipeline %s%08x: %zu declared bindings", ids.cs ? "cs" : "ps", id, d ? d->size() : 0);
     }
     if (!ids.cs && !ids.ps && !ids.vs) return;
     std::lock_guard<std::mutex> lock(g_pipeMutex);
@@ -485,8 +558,19 @@ char RegisterLetter(descriptor_type t) {
 
 // Everything bound to one stage, by shader register: tables resolved through ReShade's
 // descriptor tracking, root constant buffers, root constants.
-void WriteBindings(device* dev, ListLog& l, const Bindings& b, bool dump) {
+bool Declared(const std::vector<Decl>* decls, char cls, uint32_t space, uint32_t reg) {
+    if (!decls) return true;  // shader unknown: list everything
+    for (const Decl& d : *decls)
+        if (d.cls == cls && d.space == space && reg >= d.lo && reg <= d.hi) return true;
+    return false;
+}
+
+// Everything bound to one stage that the shader declares, by shader register: tables resolved
+// through ReShade's descriptor tracking, root constant buffers, root constants. Without the
+// shader's declarations, the first 16 slots of each range.
+void WriteBindings(device* dev, ListLog& l, const Bindings& b, bool dump, const std::vector<Decl>* decls) {
     descriptor_tracking* dt = dev->get_private_data<descriptor_tracking>();
+    if (!decls) AddLocked(l, "    (shader declarations unknown: all slots shown)");
     for (const auto& [param, table] : b.tables) {
         const pipeline_layout_param p = dt ? dt->get_pipeline_layout_param(b.layout, param) : pipeline_layout_param{};
         if (p.type != pipeline_layout_param_type::descriptor_table || !p.descriptor_table.ranges) {
@@ -496,12 +580,17 @@ void WriteBindings(device* dev, ListLog& l, const Bindings& b, bool dump) {
         for (uint32_t r = 0; r < p.descriptor_table.count; ++r) {
             const descriptor_range& range = p.descriptor_table.ranges[r];
             if (range.type == descriptor_type::sampler) continue;
-            const bool unbounded = range.count == UINT32_MAX || range.count > 64;
-            if (unbounded)
-                AddLocked(l, Format("    table param %u: %c%u.. space%u unbounded (%u), first 16 shown", param,
-                                    RegisterLetter(range.type), range.dx_register_index, range.dx_register_space, range.count));
-            const uint32_t n = unbounded ? 16 : range.count;
+            const char cls = RegisterLetter(range.type);
+            const bool unbounded = range.count == UINT32_MAX || range.count > 256;
+            uint32_t n = decls ? (unbounded ? 256 : range.count) : (range.count > 16 ? 16 : range.count);
+            uint32_t shown = 0;
             for (uint32_t k = 0; k < n; ++k) {
+                if (!Declared(decls, cls, range.dx_register_space, range.dx_register_index + k)) continue;
+                if (++shown > 24) {  // bindless arrays: a few are enough
+                    AddLocked(l, Format("    table param %u: %c space%u: more declared slots not shown", param, cls,
+                                        range.dx_register_space));
+                    break;
+                }
                 descriptor_heap heap = {0};
                 uint32_t offset = 0;
                 dev->get_descriptor_heap_offset(descriptor_table{table}, range.binding + k, 0, &heap, &offset);
@@ -536,11 +625,26 @@ void WriteBindings(device* dev, ListLog& l, const Bindings& b, bool dump) {
         }
     }
     for (const auto& [param, cb] : b.cbvs) {
-        AddLocked(l, Format("    root cbv param %u: %s +%llu", param, Describe(dev, cb.buffer).c_str(), cb.offset));
-        if (dump) DumpBuffer(dev, l, Format("param %u", param).c_str(), cb);
+        const pipeline_layout_param p = dt ? dt->get_pipeline_layout_param(b.layout, param) : pipeline_layout_param{};
+        std::string reg = "b?";
+        if (p.type == pipeline_layout_param_type::push_descriptors) {
+            if (!Declared(decls, 'b', p.push_descriptors.dx_register_space, p.push_descriptors.dx_register_index)) continue;
+            reg = Format("b%u space%u", p.push_descriptors.dx_register_index, p.push_descriptors.dx_register_space);
+        }
+        AddLocked(l, Format("    root cbv param %u (%s): %s +%llu", param, reg.c_str(), Describe(dev, cb.buffer).c_str(),
+                            cb.offset));
+        if (dump) DumpBuffer(dev, l, reg.c_str(), cb);
     }
-    for (const auto& [param, v] : b.constants)
-        AddLocked(l, Format("    root constants param %u:", param) + Floats(v.data(), v.size() < 32 ? v.size() : 32));
+    for (const auto& [param, v] : b.constants) {
+        const pipeline_layout_param p = dt ? dt->get_pipeline_layout_param(b.layout, param) : pipeline_layout_param{};
+        std::string reg = "b?";
+        if (p.type == pipeline_layout_param_type::push_constants) {
+            if (!Declared(decls, 'b', p.push_constants.dx_register_space, p.push_constants.dx_register_index)) continue;
+            reg = Format("b%u space%u", p.push_constants.dx_register_index, p.push_constants.dx_register_space);
+        }
+        AddLocked(l, Format("    root constants param %u (%s):", param, reg.c_str()) +
+                         Floats(v.data(), v.size() < 32 ? v.size() : 32));
+    }
 }
 
 // ---------------------------------------------------------------- events
@@ -584,10 +688,11 @@ void OnBindPipeline(command_list* cl, pipeline_stage stages, pipeline pipe) {
     const PipeIds ids = Pipe(pipe);
     std::lock_guard<std::mutex> lock(g_capMutex);
     ListLog& l = List(cl);
-    if ((stages & pipeline_stage::compute_shader) != 0) l.csPipe = ids;
-    if ((stages & (pipeline_stage::pixel_shader | pipeline_stage::vertex_shader | pipeline_stage::all_graphics)) != 0 &&
-        (stages & pipeline_stage::compute_shader) == 0)
-        l.gfxPipe = ids;
+    // D3D12 binds every pipeline with stages = all, so the shaders it has decide which it is.
+    if (ids.cs) l.csPipe = ids;
+    else if (ids.ps || ids.vs) l.gfxPipe = ids;
+    else if (stages == pipeline_stage::compute_shader) l.csPipe = ids;
+    else l.gfxPipe = ids;
 }
 
 void OnBindViewports(command_list* cl, uint32_t first, uint32_t count, const viewport* vps) {
@@ -655,11 +760,11 @@ void Pass(command_list* cl, bool compute, const std::string& head) {
     ++g_passes;
     if (compute) {
         AddLocked(l, Format("DISPATCH cs%08x ", l.csPipe.cs) + head);
-        WriteBindings(dev, l, l.cs, g_dumpCs.count(l.csPipe.cs) != 0);
+        WriteBindings(dev, l, l.cs, g_dumpCs.count(l.csPipe.cs) != 0, Decls(l.csPipe.cs));
     } else {
         AddLocked(l, Format("FULLSCREEN ps%08x vs%08x ", l.gfxPipe.ps, l.gfxPipe.vs) + head +
                          Format(" viewport %gx%g at %g,%g ->%s", l.vp.width, l.vp.height, l.vp.x, l.vp.y, l.rts.c_str()));
-        WriteBindings(dev, l, l.gfx, g_dumpPs.count(l.gfxPipe.ps) != 0);
+        WriteBindings(dev, l, l.gfx, g_dumpPs.count(l.gfxPipe.ps) != 0, Decls(l.gfxPipe.ps));
     }
 }
 
