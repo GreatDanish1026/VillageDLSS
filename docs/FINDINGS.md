@@ -93,5 +93,35 @@ convention for DLSS (clip y up vs pixel y down) to be settled when testing.
 Root CBV b1 (+271616) held previous/current view matrices in one dump and zeros in others:
 written after the command list was recorded, so dumps of it aren't reliable.
 
-Velocity encoding: from the shader bytecode (0.0.5 saves DumpShaders' bytecode as
-VillageDLSS-<id>.cso, disassembled with the Windows SDK's dxc -dumpbin).
+## TAA shader (pscf113c28, `PreTonemap2_PS`)
+
+Bytecode saved by 0.0.5 (`shaders/VillageDLSS-pscf113c28.cso`), disassembled with the Windows
+SDK's `dxc -dumpbin` (`.txt` next to it). DXIL with full reflection names:
+
+- cb0 `SceneInfo` (528 bytes): viewProjMat 0, transposeViewMat 64, transposeViewInvMat 112,
+  **projElement[2] 160** (projElement[0].zw = jitter, clip space), projInvElements[2] 192,
+  viewProjInvMat 224, prevViewProjMat 288, ZToLinear 352, **screenSize 368, screenInverseSize
+  376**, cameraNearPlane 392, cameraFarPlane 396, viewFrustum 400, clipplane 496.
+- cb1 `Tonemap`: exposureAdjustment, tonemapRange, sharpness, preTonemapRange (12), useAutoExposure,
+  echoBlend, AABlend (24), AASubPixel, ResponsiveAARate.
+- t0 `ReadonlyDepth`, t1 `HDRImage`, t2 `PrevHDRImage`, t3 `Velocity`; s0 PointClamp, s1 BilinearClamp.
+- Input `Exposure` comes from the vertex shader (auto exposure).
+
+What it does:
+1. Current colour = HDRImage at `(pos - projElement[0].zw * 0.5) * screenInverseSize`, times Exposure.
+2. Closest depth in a 5-tap cross (reverse-Z: largest depth = nearest).
+3. **Velocity at that pixel: prevUV = uv + (v.x * 0.5, -v.y * 0.5).** So Velocity.xy is the NDC
+   (clip xy, y up) offset from the current to the previous position.
+4. History at prevUV, neighbourhood clamp in a Reinhard space (preTonemapRange), blend.
+5. Output = resolved / Exposure (max 0): **same un-exposed space as HDRImage**.
+
+## DLSS inputs (from the above)
+
+| DLSS | Source |
+|---|---|
+| colour | TAA t1 HDRImage, rgba16f, render size; DLSS auto exposure |
+| depth | TAA t0, r32g8x24 typeless (view as R32_FLOAT_X8X24), **inverted (reverse-Z)** |
+| motion vectors | TAA t3 rgba16snorm .xy, **scale (0.5 x width, -0.5 x height)** to pixels, low-res, not jittered |
+| jitter | SceneInfo projElement[0].zw x (width/2, height/2) px; sign to settle in testing |
+| output | TAA render target (rgba16f); the history copy after it can stay |
+| reset | camera cuts: not found yet (big jumps in prevViewProjMat vs viewProjMat could do) |
