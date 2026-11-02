@@ -138,6 +138,22 @@ Transition frames with other sizes (a 1864x1048 r11g11b10f target, a 3840x2097 o
 to the game's stretch. Not done: the game's sharpening (Sharpness_PS) at output size, texture
 mip bias for the lower render size.
 
+## Sharpening, texture detail, DLSS modes (0.3.0 - 0.4.2, 2026-11-02)
+
+- Sharpness_PS (ps8195a264, reads t0 by texture coordinates and SceneInfo.screenInverseSize) is
+  redrawn at output size like the tonemap, so the game's sharpness setting applies.
+- Texture detail: mip bias log2(render scale) on material samplers (wrap + anisotropic or
+  trilinear) at creation; 5 such samplers in this game (25 others). Needs a restart.
+- The render scale is via.render.RenderConfig (native singleton) ImageQualityRate, found with a
+  REFramework Lua probe (docs/probe). reframework/VillageDLSS.lua sets it from the add-on's DLSS
+  mode (file reframework/data/VillageDLSS_mode.txt, status back in VillageDLSS_status.txt).
+  RenderConfig also has SamplerQuality, StreamingTextureLoadLevelBias, UpscaleType.
+- At 0.667 and 0.58 the game's post chain (TAA target, tonemap target) is r11g11b10f while the
+  output target stays rgba16f; at 0.5 and 0.333 both are rgba16f. So the output-size image goes
+  over the output target with our own full-screen pass (src/blit.hlsl), which converts formats.
+- Confirmed by the user: DLAA 3840x2160, Quality 2561x1440, Balanced 2227x1252, Performance
+  1920x1080, Ultra Performance 1278x719 all upscale to 3840x2160.
+
 ## DLSS inputs (from the above)
 
 | DLSS | Source |
