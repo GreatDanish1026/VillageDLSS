@@ -115,6 +115,13 @@ What it does:
 4. History at prevUV, neighbourhood clamp in a Reinhard space (preTonemapRange), blend.
 5. Output = resolved / Exposure (max 0): **same un-exposed space as HDRImage**.
 
+## DLAA result (0.1.0, 2026-11-02)
+
+Works at Image Quality 1.0: "TAA replaced by DLSS: 3840x2160 -> 3840x2160", DLAA mode, preset K.
+User: looks good, no flips needed, so the jitter sign is jitterX = -clip.x * w/2,
+jitterY = +clip.y * h/2. NGX takes about 5 s to start the first time DLSS is switched on (one
+stall). NGX's "failed to load NGXCore" and model cache lines in the log are its normal probing.
+
 ## DLSS inputs (from the above)
 
 | DLSS | Source |
