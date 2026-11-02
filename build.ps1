@@ -39,5 +39,10 @@ if ($Install) {
     $ngx = "$root\third_party\bin\nvngx_dlss.dll"
     if (-not (Test-Path $ngx)) { throw "nvngx_dlss.dll not found in third_party\bin" }
     Copy-Item $ngx $GameDir -Force
+    # REFramework companion script: sets the render scale for the DLSS mode dropdown.
+    if (Test-Path "$GameDir\reframework") {
+        New-Item -ItemType Directory -Force "$GameDir\reframework\autorun" | Out-Null
+        Copy-Item "$root\reframework\VillageDLSS.lua" "$GameDir\reframework\autorun" -Force
+    } else { Write-Warning "REFramework not installed: the DLSS mode dropdown needs it" }
     Write-Host "Installed to $GameDir"
 }

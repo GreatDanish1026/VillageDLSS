@@ -76,7 +76,17 @@ struct Settings {
     bool upscale = true;   // below the output size: DLSS to output size (else DLAA at render size)
     bool sharpen = true;   // the game's sharpening at output size when upscaling
     bool textureDetail = true;  // negative mip bias on material samplers (applied at game start)
+    int mode = 0;          // DLSS mode setting the render scale through VillageDLSS.lua (0: the game's slider)
 } g_set;
+
+struct Mode {
+    const char* name;
+    float scale;
+};
+const Mode kModes[] = {{"Game's Image Quality slider", 0},  {"DLAA (100%)", 1.0f},
+                       {"Quality (67%)", 0.667f},          {"Balanced (58%)", 0.58f},
+                       {"Performance (50%)", 0.5f},        {"Ultra Performance (33%)", 0.333f}};
+constexpr int kModeCount = sizeof(kModes) / sizeof(kModes[0]);
 
 void LoadSettings() {
     reshade::get_config_value(nullptr, RD_PRODUCT, "Enabled", g_set.enabled);
@@ -86,6 +96,8 @@ void LoadSettings() {
     reshade::get_config_value(nullptr, RD_PRODUCT, "Upscale", g_set.upscale);
     reshade::get_config_value(nullptr, RD_PRODUCT, "Sharpen", g_set.sharpen);
     reshade::get_config_value(nullptr, RD_PRODUCT, "TextureDetail", g_set.textureDetail);
+    reshade::get_config_value(nullptr, RD_PRODUCT, "Mode", g_set.mode);
+    if (g_set.mode < 0 || g_set.mode >= kModeCount) g_set.mode = 0;
 }
 
 void SaveSettings() {
@@ -96,6 +108,7 @@ void SaveSettings() {
     reshade::set_config_value(nullptr, RD_PRODUCT, "Upscale", g_set.upscale);
     reshade::set_config_value(nullptr, RD_PRODUCT, "Sharpen", g_set.sharpen);
     reshade::set_config_value(nullptr, RD_PRODUCT, "TextureDetail", g_set.textureDetail);
+    reshade::set_config_value(nullptr, RD_PRODUCT, "Mode", g_set.mode);
 }
 
 std::mutex g_statusMutex;
@@ -743,6 +756,52 @@ bool OnCreateSampler(device*, sampler_desc& d) {
     return true;
 }
 
+// ---------------------------------------------------------------- DLSS mode -> render scale
+//
+// The game's render scale is via.render.RenderConfig.ImageQualityRate (the Image Quality
+// slider). The REFramework script VillageDLSS.lua sets it: this side writes the wanted scale
+// (0: leave the slider alone) to reframework/data/VillageDLSS_mode.txt and reads back
+// VillageDLSS_status.txt ("<current scale> <frame>").
+
+std::wstring DataDir() { return ExeDir() + L"reframework\\data\\"; }
+
+float WantedScale() { return g_set.enabled && g_set.mode > 0 ? kModes[g_set.mode].scale : 0; }
+
+float g_writtenScale = -1;
+
+void WriteWantedScale() {
+    const float want = WantedScale();
+    if (want == g_writtenScale) return;
+    CreateDirectoryW((ExeDir() + L"reframework").c_str(), nullptr);
+    CreateDirectoryW(DataDir().c_str(), nullptr);
+    if (FILE* f = _wfopen((DataDir() + L"VillageDLSS_mode.txt").c_str(), L"w")) {
+        fprintf(f, "%.4f\n", want);
+        fclose(f);
+        g_writtenScale = want;
+        Log("render scale for VillageDLSS.lua: %s", want > 0 ? std::to_string(want).c_str() : "the game's slider");
+    }
+}
+
+// The script's last report: the current scale, and whether it's recent (the script is running).
+bool ScriptStatus(float* scale) {
+    const std::wstring path = DataDir() + L"VillageDLSS_status.txt";
+    WIN32_FILE_ATTRIBUTE_DATA a;
+    if (!GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &a)) return false;
+    FILETIME now;
+    GetSystemTimeAsFileTime(&now);
+    const uint64_t t = (uint64_t(a.ftLastWriteTime.dwHighDateTime) << 32) | a.ftLastWriteTime.dwLowDateTime;
+    const uint64_t n = (uint64_t(now.dwHighDateTime) << 32) | now.dwLowDateTime;
+    if (n > t && n - t > 50000000ull) return false;  // older than 5 s
+    FILE* f = _wfopen(path.c_str(), L"r");
+    if (!f) return false;
+    float v = -1;
+    const int got = fscanf(f, "%f", &v);
+    fclose(f);
+    if (got != 1) return false;
+    *scale = v;
+    return true;
+}
+
 bool g_keyWasDown = false;
 bool g_wasEnabled = false;
 bool g_samplerStatsLogged = false;
@@ -795,6 +854,7 @@ void UpscalerPresent(swapchain* sc) {
     }
     g_keyWasDown = down;
     g_wasEnabled = g_set.enabled;
+    WriteWantedScale();
     if (!g_samplerStatsLogged && g_frame > 600) {
         g_samplerStatsLogged = true;
         Log("samplers: %u material ones biased by %.2f, %u others", g_samplersBiased.load(), g_mipBias, g_samplersOther.load());
@@ -804,7 +864,16 @@ void UpscalerPresent(swapchain* sc) {
 void UpscalerOverlay() {
     bool changed = ImGui::Checkbox("DLSS in place of TAA (F9)", &g_set.enabled);
     changed |= ImGui::Checkbox("Upscale when Image Quality is below 1.0", &g_set.upscale);
-    ImGui::TextDisabled("Image Quality sets the render size: 0.67 = DLSS Quality, 0.58 Balanced, 0.5 Performance.");
+    {
+        const char* names[kModeCount];
+        for (int i = 0; i < kModeCount; ++i) names[i] = kModes[i].name;
+        changed |= ImGui::Combo("DLSS mode", &g_set.mode, names, kModeCount);
+        float now = 0;
+        if (ScriptStatus(&now))
+            ImGui::TextDisabled("Render scale now: %.0f%%%s", now * 100, g_set.mode > 0 && g_set.enabled ? " (set by the DLSS mode)" : " (game's slider)");
+        else if (g_set.mode > 0)
+            ImGui::TextColored(ImVec4(1, 0.6f, 0.3f, 1), "VillageDLSS.lua isn't running: copy it to reframework\\autorun");
+    }
     const char* presets[] = {"DLSS default", "J (transformer)", "K (transformer, recommended)"};
     int idx = g_set.preset == 10 ? 1 : g_set.preset == 11 ? 2 : 0;
     if (ImGui::Combo("Model preset", &idx, presets, 3)) {
@@ -846,7 +915,7 @@ void UpscalerInit() {
     reshade::register_event<reshade::addon_event::bind_scissor_rects>(&OnBindScissors);
     reshade::register_event<reshade::addon_event::destroy_device>(&OnDestroyDevice);
     reshade::register_event<reshade::addon_event::create_sampler>(&OnCreateSampler);
-    const float scale = StartupRenderScale();
+    const float scale = g_set.enabled && g_set.mode > 0 ? kModes[g_set.mode].scale : StartupRenderScale();
     if (g_set.enabled && g_set.upscale && g_set.textureDetail && scale < 0.99f) g_mipBias = std::log2(scale);
     Log("texture mip bias %.2f (Image Quality %.2f at start)", g_mipBias, scale);
     Log("DLSS %s at start (F9 toggles), upscaling %s", g_set.enabled ? "on" : "off", g_set.upscale ? "on" : "off");
