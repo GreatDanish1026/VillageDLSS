@@ -38,10 +38,31 @@ Performance has the same structure. So the whole post chain runs at internal res
 DLSS replacing TAA would have to output at internal size, or the post passes after TAA would
 have to run at output size.
 
-## TAA candidate
+## Post chain (confirmed with 0.0.4, captures/r2: frame-1 = Image Quality 1.0, frame-2 = 0.5, both HDR10)
 
-Frame-3 line 54040: full-screen pass writing #2a6a3 (1920x1080 rgba16f), which reads the velocity
-texture, and is immediately copied to #2a60a (history for next frame). At native it's frame-1 line
-55979 (writes #3310b 3840x2160). Preceded by motion-blur-like tile reductions (csf1d0eec6,
-csa1d7d4cf). To confirm with 0.0.4 (pixel shader id, declared inputs) and then dump its
-constants for jitter.
+In list L4, all at internal resolution unless noted:
+
+| Pass | Shader | Reads | Writes |
+|---|---|---|---|
+| camera velocity | psc303a118 | t0 depth | rgba16snorm velocity (G-buffer RT 3) |
+| lighting/fog ... | cs4206d838, psa2c098fe | G-buffer | rgba16f scene colour |
+| depth history | copy | depth | prev depth |
+| bloom-ish mips | cs58b193d0, csf1d0eec6, csa1d7d4cf | scene colour | mip chain |
+| **TAA** | **pscf113c28** | t0 depth (r32g8x24), t1 scene colour (rgba16f), t2 history (rgba16f), t3 velocity (rgba16snorm); root CBVs b0, b1 | rgba16f TAA output |
+| history save | copy | TAA output | history (read as t2 next frame) |
+| bloom down/up | ps6388e1dd, psc0ec2e42 x6, ps554e83fe .. ps5e69525e | TAA output | 960x540 .. 15x8 chain |
+| bloom composite | ps77ae4c63 | bloom | TAA output texture |
+| tonemap/grade | ps3cc6333b (b4..b11 CBVs, LUTs) | depth, TAA output | rgba16f |
+| sharpen (CAS?) | ps8195a264 | tonemapped | rgba16f |
+| upscale (only below 1.0) | ps48155d5e | depth, two colour targets | 3840x2160 rgba16f |
+| HUD | ps10e0b9fc, psa63129f6 (6-index quads) | UI atlases | 3840x2160 |
+| output | psaf8e9bff (HDR encode; RenoDX) | 3840x2160 rgba16f | back buffer rgb10a2 |
+
+So DLSS replaces pscf113c28: colour = t1, depth = t0, motion vectors = t3, output = its render
+target (and the history copy can stay or be skipped). At Image Quality 1.0 this is DLAA with
+no other changes. For upscaling, bloom, tonemap and sharpen run at internal size after TAA;
+options are re-running ps3cc6333b (and ps8195a264) at output size on the DLSS output with the
+bloom upsampled, or replacing ps48155d5e's input with a DLSS image tonemapped at output size.
+
+Jitter and the velocity encoding: dumping pscf113c28 and psc303a118 constants next
+(ReShade.ini [VillageDLSS] DumpShaders=pscf113c28,psc303a118).
