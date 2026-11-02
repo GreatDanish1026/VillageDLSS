@@ -64,5 +64,34 @@ no other changes. For upscaling, bloom, tonemap and sharpen run at internal size
 options are re-running ps3cc6333b (and ps8195a264) at output size on the DLSS output with the
 bloom upsampled, or replacing ps48155d5e's input with a DLSS image tonemapped at output size.
 
-Jitter and the velocity encoding: dumping pscf113c28 and psc303a118 constants next
-(ReShade.ini [VillageDLSS] DumpShaders=pscf113c28,psc303a118).
+## Camera constants and jitter (captures/r3: frame-1 = 1.0, frame-2 = 0.5)
+
+TAA's root CBV b0 (graphics root param 3, also param 9) is the camera constant buffer, a 4 KB
+block in a 32 MB upload buffer, double-buffered (offset alternates, e.g. +49664 / +51200):
+
+| Byte | Contents |
+|---|---|
+| 0..159 | view-projection / view matrices |
+| 160, 164 | projection x scale 1.42815, y scale 2.53893 (16:9) |
+| **168, 172** | **jitter in clip space (x, y)** |
+| 176..188 | 2.5e-6, -1, 0.01 (near), 0: reverse-Z |
+| 192, 196 | tan(fov/2) x 0.700208, y 0.393867; 204 = 99.9997 |
+| 208, 212 | jitter in view space (clip jitter x tan) |
+
+Jitter in pixels = clip x (width/2, height/2):
+
+| Capture | Frame | x px | y px |
+|---|---|---|---|
+| 3840x2160 | 1 | -0.15625 | -0.1759 |
+| 3840x2160 | 2 | +0.09375 | -0.0093 |
+| 1920x1080 | 1 | +0.125 | -0.1944 |
+| 1920x1080 | 2 | -0.1875 | -0.0278 |
+
+So jitter is in pixel units of the render size, within +-0.5 px (x in 1/32 steps). Sign
+convention for DLSS (clip y up vs pixel y down) to be settled when testing.
+
+Root CBV b1 (+271616) held previous/current view matrices in one dump and zeros in others:
+written after the command list was recorded, so dumps of it aren't reliable.
+
+Velocity encoding: from the shader bytecode (0.0.5 saves DumpShaders' bytecode as
+VillageDLSS-<id>.cso, disassembled with the Windows SDK's dxc -dumpbin).

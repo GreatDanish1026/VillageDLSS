@@ -236,11 +236,30 @@ std::vector<Decl> ParseDecls(const uint8_t* p, size_t n) {
     return out;
 }
 
+std::unordered_set<uint32_t> g_dumpPs, g_dumpCs;  // from ReShade.ini [VillageDLSS] DumpShaders
+
+// Shaders in the dump list also get their bytecode saved as VillageDLSS-<id>.cso (once a run).
+void SaveBytecode(const char* prefix, uint32_t id, const void* code, size_t size) {
+    static std::mutex m;
+    static std::unordered_set<uint32_t> saved;
+    std::lock_guard<std::mutex> lock(m);
+    if (!saved.insert(id).second) return;
+    wchar_t name[64];
+    swprintf(name, 64, L"VillageDLSS-%hs%08x.cso", prefix, id);
+    if (FILE* f = _wfopen((g_exeDir + name).c_str(), L"wb")) {
+        fwrite(code, 1, size, f);
+        fclose(f);
+        Log("saved %s%08x bytecode (%zu bytes)", prefix, id, size);
+    }
+}
+
 uint32_t ShaderHash(const pipeline_subobject& s) {
     if (!s.data) return 0;
     const shader_desc& d = *static_cast<const shader_desc*>(s.data);
     if (!d.code || !d.code_size) return 0;
     const uint32_t id = Fnv(d.code, d.code_size);
+    if (s.type == pipeline_subobject_type::pixel_shader && g_dumpPs.count(id)) SaveBytecode("ps", id, d.code, d.code_size);
+    if (s.type == pipeline_subobject_type::compute_shader && g_dumpCs.count(id)) SaveBytecode("cs", id, d.code, d.code_size);
     std::vector<Decl> decls = ParseDecls(static_cast<const uint8_t*>(d.code), d.code_size);
     std::lock_guard<std::mutex> lock(g_pipeMutex);
     g_decls[id] = std::move(decls);
@@ -287,8 +306,7 @@ PipeIds Pipe(pipeline pipe) {
     return it == g_pipes.end() ? PipeIds{} : it->second;
 }
 
-// Shader ids whose constant buffers get dumped, from ReShade.ini [VillageDLSS] DumpShaders.
-std::unordered_set<uint32_t> g_dumpPs, g_dumpCs;
+// Fills g_dumpPs / g_dumpCs: shaders whose constant buffers (and bytecode) get dumped.
 
 void LoadDumpList() {
     char buf[2048] = {};
