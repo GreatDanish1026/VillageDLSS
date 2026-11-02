@@ -4,7 +4,8 @@
  *
  * From ReShade 6.8.0 examples/utils. Changed for ReunionDLSS: descriptor tables with range
  * flags (D3D12 root signature 1.1) are stored too, and lookups of unknown heaps or layouts
- * return nothing instead of throwing.
+ * return nothing instead of throwing. Changed for VillageDLSS: copies from descriptors that
+ * were never tracked no longer read past the end of the source heap's vector.
  */
 
 #include "reshade.hpp"
@@ -155,6 +156,10 @@ bool descriptor_tracking::on_copy_descriptor_tables(device *device, uint32_t cou
 
 		if (dst_offset + copy.count > dst_pool_data.descriptors.size())
 			dst_pool_data.descriptors.grow_to_at_least(dst_offset + copy.count);
+		// The source may hold descriptors written before tracking began (or never seen): those
+		// read as empty instead of past the end of the vector (VillageDLSS: RE Engine does this).
+		if (src_offset + copy.count > src_pool_data.descriptors.size())
+			src_pool_data.descriptors.grow_to_at_least(src_offset + copy.count);
 
 		for (uint32_t k = 0; k < copy.count; ++k)
 		{

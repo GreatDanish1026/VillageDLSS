@@ -76,6 +76,73 @@ void OpenLog() {
     Log(RD_PRODUCT " " RD_VERSION " loaded");
 }
 
+// ---------------------------------------------------------------- crash catcher
+//
+// Logs the first access violation / illegal instruction anywhere in the process (module +
+// offset and a stack) and writes VillageDLSS-crash.dmp next to the exe. Handled exceptions the
+// game expects would also be logged, so only the first few are reported.
+
+HMODULE g_self = nullptr;
+void* g_veh = nullptr;
+std::atomic<int> g_faults{0};
+
+std::string ModuleOffset(const void* addr) {
+    HMODULE m = nullptr;
+    if (!GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                            static_cast<LPCWSTR>(addr), &m) || !m) {
+        char b[32];
+        snprintf(b, sizeof(b), "%p", addr);
+        return b;
+    }
+    char name[MAX_PATH] = {};
+    GetModuleFileNameA(m, name, MAX_PATH);
+    const char* base = strrchr(name, '\\');
+    char b[MAX_PATH + 32];
+    snprintf(b, sizeof(b), "%s+0x%llx", base ? base + 1 : name,
+             static_cast<unsigned long long>(reinterpret_cast<const uint8_t*>(addr) - reinterpret_cast<const uint8_t*>(m)));
+    return b;
+}
+
+typedef BOOL(WINAPI* MiniDumpWriteDumpFn)(HANDLE, DWORD, HANDLE, int, void*, void*, void*);
+
+struct DumpExceptionInfo {
+    DWORD ThreadId;
+    EXCEPTION_POINTERS* ExceptionPointers;
+    BOOL ClientPointers;
+};
+
+LONG CALLBACK OnException(EXCEPTION_POINTERS* e) {
+    const DWORD code = e->ExceptionRecord->ExceptionCode;
+    if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_STACK_OVERFLOW &&
+        code != 0xC0000409 /* fail fast */)
+        return EXCEPTION_CONTINUE_SEARCH;
+    const int n = ++g_faults;
+    if (n > 3) return EXCEPTION_CONTINUE_SEARCH;
+    void* at = e->ExceptionRecord->ExceptionAddress;
+    std::string where = ModuleOffset(at);
+    Log("EXCEPTION 0x%08lx at %s (thread %lu), info %llx %llx", code, where.c_str(), GetCurrentThreadId(),
+        static_cast<unsigned long long>(e->ExceptionRecord->ExceptionInformation[0]),
+        static_cast<unsigned long long>(e->ExceptionRecord->ExceptionInformation[1]));
+    void* frames[32];
+    const USHORT count = RtlCaptureStackBackTrace(0, 32, frames, nullptr);
+    for (USHORT i = 0; i < count; ++i) Log("  stack %2u: %s", i, ModuleOffset(frames[i]).c_str());
+    if (n == 1) {
+        if (HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll")) {
+            auto write = reinterpret_cast<MiniDumpWriteDumpFn>(GetProcAddress(dbghelp, "MiniDumpWriteDump"));
+            HANDLE f = CreateFileW((g_exeDir + L"VillageDLSS-crash.dmp").c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS,
+                                   FILE_ATTRIBUTE_NORMAL, nullptr);
+            if (write && f != INVALID_HANDLE_VALUE) {
+                DumpExceptionInfo info = {GetCurrentThreadId(), e, FALSE};
+                // MiniDumpWithIndirectlyReferencedMemory | MiniDumpWithThreadInfo
+                write(GetCurrentProcess(), GetCurrentProcessId(), f, 0x40 | 0x1000, &info, nullptr, nullptr);
+                Log("wrote VillageDLSS-crash.dmp");
+            }
+            if (f != INVALID_HANDLE_VALUE) CloseHandle(f);
+        }
+    }
+    return EXCEPTION_CONTINUE_SEARCH;
+}
+
 std::string Format(const char* fmt, ...) {
     char buf[1024];
     va_list ap;
@@ -679,6 +746,8 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
             if (!reshade::register_addon(module)) return FALSE;
             g_loadTick = GetTickCount64();
             OpenLog();
+            g_self = module;
+            g_veh = AddVectoredExceptionHandler(1, &OnException);
             LoadDumpList();
             descriptor_tracking::register_events();
             reshade::register_event<reshade::addon_event::init_pipeline>(&OnInitPipeline);
@@ -704,6 +773,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
             reshade::register_overlay(RD_PRODUCT, &DrawOverlay);
             break;
         case DLL_PROCESS_DETACH:
+            if (g_veh) RemoveVectoredExceptionHandler(g_veh);
             descriptor_tracking::unregister_events();
             reshade::unregister_addon(module);
             if (g_log) fclose(g_log);
