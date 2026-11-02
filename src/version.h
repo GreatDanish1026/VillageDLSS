@@ -3,4 +3,4 @@
 
 #define RD_PRODUCT "VillageDLSS"  // add-on name, log file name, ReShade.ini section
 #define RD_GAME "Resident Evil Village"
-#define RD_VERSION "0.1.0"
+#define RD_VERSION "0.1.1"

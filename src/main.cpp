@@ -318,7 +318,7 @@ void LoadDumpList() {
     char buf[2048] = {};
     size_t size = sizeof(buf);
     if (!reshade::get_config_value(nullptr, RD_PRODUCT, "DumpShaders", buf, &size)) return;
-    std::string s(buf);
+    std::string s(buf, size && size <= sizeof(buf) ? size : strlen(buf));  // ReShade returns a list split by NULs
     for (char& c : s)
         if (c == ' ' || c == ';' || c == '\0') c = ',';
     size_t pos = 0;
@@ -333,7 +333,7 @@ void LoadDumpList() {
         else if (t.compare(0, 2, "cs") == 0) g_dumpCs.insert(id);
         else if (t.compare(0, 2, "vs") == 0) g_dumpVs.insert(id);  // bytecode only
     }
-    Log("dumping constants for %zu pixel and %zu compute shaders", g_dumpPs.size(), g_dumpCs.size());
+    Log("dumping %zu pixel, %zu compute and %zu vertex shaders", g_dumpPs.size(), g_dumpCs.size(), g_dumpVs.size());
 }
 
 // ---------------------------------------------------------------- resource descriptions
