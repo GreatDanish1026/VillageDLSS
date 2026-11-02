@@ -122,6 +122,22 @@ User: looks good, no flips needed, so the jitter sign is jitterX = -clip.x * w/2
 jitterY = +clip.y * h/2. NGX takes about 5 s to start the first time DLSS is switched on (one
 stall). NGX's "failed to load NGXCore" and model cache lines in the log are its normal probing.
 
+## Upscaling (0.2.0 / 0.2.1, 2026-11-02)
+
+Confirmed by the user at Image Quality 0.5..0.7 (1920x1080, 2304x1296, 2688x1512 -> 3840x2160):
+no issues. Below the output size: DLSS writes an output-size image while the game's TAA still
+runs at render size; NewFinal (ps77ae4c63, bloom, texture coordinates) is drawn again into it;
+LDRPostProcess_WithTonemap (ps3cc6333b, reads t1 by pixel position and SceneInfo.screenSize) is
+drawn only at output size, with t1 rewritten in its descriptor table and a SceneInfo copy with
+the output size; CopyImageWithDepthPS (ps48155d5e) runs (it writes the output-size depth) and
+the output-size image is copied over its colour.
+
+The tonemap's descriptor tables are ring-allocated per frame (hundreds of different tables in
+a session), so rewritten slots are never put back (0.2.0 did, wrongly; fixed in 0.2.1).
+Transition frames with other sizes (a 1864x1048 r11g11b10f target, a 3840x2097 one) fall back
+to the game's stretch. Not done: the game's sharpening (Sharpness_PS) at output size, texture
+mip bias for the lower render size.
+
 ## DLSS inputs (from the above)
 
 | DLSS | Source |
