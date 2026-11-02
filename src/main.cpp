@@ -1,8 +1,8 @@
-// VillageDLSS: a ReShade add-on for Resident Evil Village (RE Engine, DirectX 12) that will
-// replace the game's TAA with DLSS.
+// VillageDLSS: a ReShade add-on for Resident Evil Village (RE Engine, DirectX 12) that replaces
+// the game's TAA with DLSS (upscaler.cpp). This file: logging, shader ids, resource tracking,
+// the overlay, and the frame capture tool used to find TAA (docs/FINDINGS.md).
 //
-// 0.0.1 is only a frame capture tool: it changes nothing in the game. F10 records two frames of
-// GPU work to VillageDLSS-frame-N.txt next to re8.exe:
+// Frame capture: F10 records two frames of GPU work to VillageDLSS-frame-N.txt next to re8.exe:
 //   - every compute dispatch, and every full-screen draw (3 or 4 vertices / 6 indices, one
 //     instance), with a stable id of its shader, the viewport, render targets, root constants,
 //     root constant buffers and the textures in its descriptor tables by shader register;
@@ -31,11 +31,12 @@
 #include <unordered_set>
 #include <vector>
 
+#include "common.hpp"
 #include "version.h"
 #include "../third_party/reshade/utils/descriptor_tracking.hpp"
 
 extern "C" __declspec(dllexport) const char* NAME = RD_PRODUCT;
-extern "C" __declspec(dllexport) const char* DESCRIPTION = "DLSS for " RD_GAME " (in development: frame capture only).";
+extern "C" __declspec(dllexport) const char* DESCRIPTION = "DLSS in place of " RD_GAME "'s TAA (in development).";
 
 namespace {
 
@@ -51,12 +52,9 @@ FILE* g_log = nullptr;
 ULONGLONG g_loadTick = 0;
 std::wstring g_exeDir;
 
-void Log(const char* fmt, ...) {
+void LogV(const char* fmt, va_list ap) {
     char buf[1024];
-    va_list ap;
-    va_start(ap, fmt);
     vsnprintf(buf, sizeof(buf), fmt, ap);
-    va_end(ap);
     std::lock_guard<std::mutex> lock(g_logMutex);
     if (!g_log) return;
     SYSTEMTIME t;
@@ -64,6 +62,13 @@ void Log(const char* fmt, ...) {
     fprintf(g_log, "%02u:%02u:%02u.%03u [+%5.1f s] %s\n", t.wHour, t.wMinute, t.wSecond, t.wMilliseconds,
             (GetTickCount64() - g_loadTick) / 1000.0, buf);
     fflush(g_log);
+}
+
+void Log(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    LogV(fmt, ap);
+    va_end(ap);
 }
 
 void OpenLog() {
@@ -792,10 +797,11 @@ bool OnDispatch(command_list* cl, uint32_t x, uint32_t y, uint32_t z) {
 }
 
 bool OnDraw(command_list* cl, uint32_t vertices, uint32_t instances, uint32_t, uint32_t) {
-    if (!Recording()) return false;
+    const bool replaced = rd::UpscalerOnDraw(cl, vertices, instances);
+    if (!Recording()) return replaced;
     if (vertices <= 4 && instances == 1) {
-        Pass(cl, false, Format("draw %u verts", vertices));
-        return false;
+        Pass(cl, false, Format("draw %u verts%s", vertices, replaced ? " (replaced by DLSS)" : ""));
+        return replaced;
     }
     std::lock_guard<std::mutex> lock(g_capMutex);
     ++List(cl).draws;
@@ -916,12 +922,15 @@ void OnPresent(command_queue*, swapchain* sc, const rect*, const rect*, uint32_t
     bool down = pid == GetCurrentProcessId() && (GetAsyncKeyState(kCaptureHotkey) & 0x8000);
     if (down && !g_keyWasDown) StartCapture();
     g_keyWasDown = down;
+    rd::UpscalerPresent();
 }
 
 // ---------------------------------------------------------------- overlay
 
 void DrawOverlay(effect_runtime*) {
-    ImGui::TextDisabled(RD_PRODUCT " " RD_VERSION " (frame capture only; changes nothing in the game)");
+    ImGui::TextDisabled(RD_PRODUCT " " RD_VERSION);
+    rd::UpscalerOverlay();
+    ImGui::SeparatorText("Frame capture (for development)");
     ImGui::BeginDisabled(g_capture.load() != Capture::Idle);
     if (ImGui::Button("Capture frame (F10)")) StartCapture();
     ImGui::EndDisabled();
@@ -932,6 +941,29 @@ void DrawOverlay(effect_runtime*) {
 }
 
 }  // namespace
+
+namespace rd {
+
+void Log(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    LogV(fmt, ap);
+    va_end(ap);
+}
+
+std::wstring ExeDir() { return g_exeDir; }
+
+uint32_t PipelinePs(pipeline pipe) {
+    const PipeIds ids = Pipe(pipe);
+    return ids.ps ? ids.ps : ids.cs;
+}
+
+resource ViewResource(resource_view view) {
+    ViewInfo info;
+    return FindView(view, &info) ? info.res : resource{0};
+}
+
+}  // namespace rd
 
 BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
     switch (reason) {
@@ -968,8 +1000,10 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
             reshade::register_event<reshade::addon_event::resolve_texture_region>(&OnResolve);
             reshade::register_event<reshade::addon_event::present>(&OnPresent);
             reshade::register_overlay(RD_PRODUCT, &DrawOverlay);
+            rd::UpscalerInit();
             break;
         case DLL_PROCESS_DETACH:
+            rd::UpscalerShutdown();
             if (g_veh) RemoveVectoredExceptionHandler(g_veh);
             descriptor_tracking::unregister_events();
             reshade::unregister_addon(module);

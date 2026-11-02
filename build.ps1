@@ -1,6 +1,6 @@
 # Builds bin\VillageDLSS.addon64 with MSVC (Visual Studio 2022+ with C++ tools).
 # Usage: .\build.ps1 [-Install] [-GameDir <folder of re8.exe>]
-#   -Install  copies the add-on next to re8.exe (game closed).
+#   -Install  copies the add-on and nvngx_dlss.dll next to re8.exe (game closed).
 param(
     [switch]$Install,
     [string]$GameDir = "E:\SteamLibrary\steamapps\common\Resident Evil Village BIOHAZARD VILLAGE"
@@ -22,8 +22,9 @@ $addon = "$root\bin\VillageDLSS.addon64"
 $cmd = @(
     "call `"$vcvars`" >nul",
     ("cl /nologo /std:c++17 /O2 /EHsc /MT /W3 /D_CRT_SECURE_NO_WARNINGS /DNOMINMAX " +
-     "/I `"$root\third_party\imgui`" /I `"$root\third_party\reshade\include`" " +
-     "/Fo`"$obj\\`" `"$root\src\main.cpp`" `"$root\third_party\reshade\utils\descriptor_tracking.cpp`" user32.lib advapi32.lib ole32.lib " +
+     "/I `"$root\third_party\imgui`" /I `"$root\third_party\reshade\include`" /I `"$root\third_party\dlss\include`" " +
+     "/Fo`"$obj\\`" `"$root\src\main.cpp`" `"$root\src\upscaler.cpp`" `"$root\src\dlss.cpp`" `"$root\third_party\reshade\utils\descriptor_tracking.cpp`" " +
+     "user32.lib advapi32.lib ole32.lib d3d12.lib `"$root\third_party\dlss\lib\nvsdk_ngx_s.lib`" " +
      "/link /DLL /OUT:`"$addon`" /PDB:`"$obj\VillageDLSS.pdb`" /DEBUG")
 ) -join " && "
 cmd /c $cmd
@@ -34,5 +35,9 @@ if ($Install) {
     if (-not (Test-Path "$GameDir\re8.exe")) { throw "re8.exe not found in $GameDir (pass -GameDir)" }
     if (Get-Process re8 -ErrorAction SilentlyContinue) { throw "Close the game first." }
     Copy-Item $addon $GameDir -Force
+    # NVIDIA's signed DLSS runtime (310.9.16, from the Streamline 2.14.16 SDK's bin\x64; not in git).
+    $ngx = "$root\third_party\bin\nvngx_dlss.dll"
+    if (-not (Test-Path $ngx)) { throw "nvngx_dlss.dll not found in third_party\bin" }
+    Copy-Item $ngx $GameDir -Force
     Write-Host "Installed to $GameDir"
 }
