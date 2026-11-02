@@ -1,4 +1,4 @@
-﻿// DLSS in place of the game's TAA (docs/FINDINGS.md).
+// DLSS in place of the game's TAA (docs/FINDINGS.md).
 //
 // The TAA pass (pixel shader pscf113c28) is a full-screen draw reading t0 depth (reverse-Z), t1
 // the scene colour before exposure, t2 last frame's TAA output and t3 the velocity (NDC offset
@@ -43,6 +43,8 @@
 #include <vector>
 
 #include "../third_party/reshade/utils/descriptor_tracking.hpp"
+#include "blit_ps.h"  // kBlitPs, kBlitVs: blit.hlsl compiled by build.ps1
+#include "blit_vs.h"
 #include "dlss.hpp"
 #include "version.h"
 
@@ -534,7 +536,7 @@ bool OnTaa(command_list* cl, ListState& s) {
 
     std::lock_guard<std::mutex> lock(g_resMutex);
     const bool upscale = g_set.upscale && g_outW && g_outH && renderW < g_outW && renderH < g_outH &&
-                         renderW * 3 >= g_outW && renderH * 3 >= g_outH;  // DLSS goes down to a third
+                         renderW * 3 + 16 >= g_outW && renderH * 3 + 16 >= g_outH;  // DLSS goes down to a third (1278 x 3 = 3834)
     const uint32_t outW = upscale ? g_outW : td.texture.width, outH = upscale ? g_outH : td.texture.height;
     const resource_usage usage = resource_usage::unordered_access | resource_usage::copy_source |
                                  resource_usage::shader_resource | resource_usage::render_target;
@@ -681,40 +683,85 @@ bool OnSharpen(command_list* cl, ListState& s) {
 
 // The game's stretch to output size: its draw runs (it also writes the output-size depth), then
 // the output-size image (Y, or Z when sharpened) goes over its colour.
+//
+// It's drawn with our own full-screen pass (blit.hlsl), not copied: at some render scales the
+// game's post chain is r11g11b10f while its output target is rgba16f, and only a render target
+// write converts formats. g_resMutex held for these.
+
+pipeline_layout g_blitLayout = {0};
+std::map<format, pipeline> g_blitPipes;  // one per render target format
+
+pipeline BlitPipeline(device* dev, format fmt) {
+    if (!g_blitLayout.handle) {
+        descriptor_range r = {};
+        r.count = 1;
+        r.array_size = 1;
+        r.visibility = shader_stage::pixel;
+        r.type = descriptor_type::texture_shader_resource_view;
+        const pipeline_layout_param p(r);
+        if (!dev->create_pipeline_layout(1, &p, &g_blitLayout)) {
+            g_blitLayout = {0};
+            Log("couldn't create the blit pipeline layout");
+            return {0};
+        }
+    }
+    auto it = g_blitPipes.find(fmt);
+    if (it != g_blitPipes.end()) return it->second;
+    shader_desc vs = {}, ps = {};
+    vs.code = kBlitVs, vs.code_size = sizeof(kBlitVs);
+    ps.code = kBlitPs, ps.code_size = sizeof(kBlitPs);
+    rasterizer_desc rs = {};
+    rs.cull_mode = cull_mode::none;
+    depth_stencil_desc ds = {};
+    ds.depth_enable = false;
+    ds.stencil_enable = false;
+    primitive_topology topology = primitive_topology::triangle_list;
+    format rt = fmt;
+    const pipeline_subobject subs[] = {{pipeline_subobject_type::vertex_shader, 1, &vs},
+                                       {pipeline_subobject_type::pixel_shader, 1, &ps},
+                                       {pipeline_subobject_type::rasterizer_state, 1, &rs},
+                                       {pipeline_subobject_type::depth_stencil_state, 1, &ds},
+                                       {pipeline_subobject_type::primitive_topology, 1, &topology},
+                                       {pipeline_subobject_type::render_target_formats, 1, &rt}};
+    pipeline p = {0};
+    if (!dev->create_pipeline(g_blitLayout, 6, subs, &p)) {
+        Log("couldn't create the blit pipeline for format %u", static_cast<unsigned>(fmt));
+        p = {0};
+    }
+    g_blitPipes[fmt] = p;
+    return p;
+}
+
 bool OnCopy(command_list* cl, ListState& s) {
     std::lock_guard<std::mutex> lock(g_resMutex);
-    if (!g_up.active || !g_up.tonemapDone || !g_up.final || !g_up.final->res.handle) return false;
+    if (!g_up.active || !g_up.tonemapDone || !g_up.final || !g_up.final->srv.handle) return false;
     Texture& src = *g_up.final;
+    device* dev = cl->get_device();
     const resource target = ViewResource(s.rtvs[0]);
     if (!target.handle) return false;
-    const resource_desc td = cl->get_device()->get_resource_desc(target);
-    // A copy needs formats of one family, and fits into a target at least as large (copied to its
-    // top-left corner; the game's target may be padded at some render scales).
-    const bool sameFamily = format_to_typeless(td.texture.format) == format_to_typeless(src.fmt);
-    if (!sameFamily || td.texture.width < src.w || td.texture.height < src.h || td.texture.samples > 1) {
+    const resource_desc td = dev->get_resource_desc(target);
+    const pipeline blit = BlitPipeline(dev, td.texture.format);
+    if (td.texture.width < src.w || td.texture.height < src.h || td.texture.samples > 1 || !blit.handle) {
         Fail("output target " + std::to_string(td.texture.width) + "x" + std::to_string(td.texture.height) + " format " +
              std::to_string(static_cast<unsigned>(td.texture.format)) + " doesn't take the " + std::to_string(src.w) +
-             "x" + std::to_string(src.h) + " format " + std::to_string(static_cast<unsigned>(src.fmt)) +
-             " image: game's upscaling used");
+             "x" + std::to_string(src.h) + " image: game's upscaling used");
         return false;
     }
+    cl->draw(3, 1, 0, 0);  // the game's pass (output-size depth)
+    Transition(cl, src, resource_usage::shader_resource);
+    cl->bind_pipeline(pipeline_stage::all_graphics, blit);
+    const dynamic_state topoState = dynamic_state::primitive_topology;
+    const uint32_t topo = static_cast<uint32_t>(primitive_topology::triangle_list);
+    cl->bind_pipeline_states(1, &topoState, &topo);
+    descriptor_table_update u = {};
+    u.count = 1;
+    u.type = descriptor_type::texture_shader_resource_view;
+    u.descriptors = &src.srv;
+    cl->push_descriptors(shader_stage::pixel, g_blitLayout, 0, u);
+    BindFullTarget(cl, s.rtvs[0], src.w, src.h);
     cl->draw(3, 1, 0, 0);
-    Transition(cl, src, resource_usage::copy_source);
-    cl->barrier(target, resource_usage::render_target, resource_usage::copy_dest);
-    if (td.texture.width == src.w && td.texture.height == src.h && td.texture.format == src.fmt) {
-        cl->copy_resource(src.res, target);
-    } else {
-        static bool logged = false;
-        if (!logged) {
-            logged = true;
-            Log("output target %ux%u format %u, image %ux%u format %u: copied to its corner", td.texture.width,
-                td.texture.height, static_cast<unsigned>(td.texture.format), src.w, src.h, static_cast<unsigned>(src.fmt));
-        }
-        const subresource_box box = {0, 0, 0, src.w, src.h, 1};
-        cl->copy_texture_region(src.res, 0, &box, target, 0, nullptr, filter_mode::min_mag_mip_point);
-    }
-    cl->barrier(target, resource_usage::copy_dest, resource_usage::render_target);
-    Transition(cl, src, resource_usage::render_target);
+    Restore(cl, s);
+    RestoreTargets(cl, s);
     g_up.active = false;
     return true;
 }
@@ -734,6 +781,11 @@ void DestroyAll(device* dev) {
     }
     g_cb = {0};
     g_cbData = nullptr;
+    for (auto& [fmt, p] : g_blitPipes)
+        if (p.handle) dev->destroy_pipeline(p);
+    g_blitPipes.clear();
+    if (g_blitLayout.handle) dev->destroy_pipeline_layout(g_blitLayout);
+    g_blitLayout = {0};
     g_dev = nullptr;
 }
 
