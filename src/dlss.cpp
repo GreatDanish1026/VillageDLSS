@@ -218,9 +218,10 @@ bool Evaluate(ID3D12GraphicsCommandList* list, const Inputs& in, std::string& er
         return false;
     }
     char buf[160];
-    snprintf(buf, sizeof(buf), "running: %ux%u -> %ux%u, %s mode, preset %c, %zu view%s", f.renderW, f.renderH, f.outW,
-             f.outH, QualityName(f.quality), f.preset ? static_cast<char>('A' + f.preset - 1) : 'D', g_features.size(),
-             g_features.size() == 1 ? "" : "s");
+    // The render scale, not NGX's quality mode name: its ranges overlap (1080p -> 4K reads as Quality).
+    const unsigned scale = f.outW ? (f.renderW * 100 + f.outW / 2) / f.outW : 0;
+    snprintf(buf, sizeof(buf), "running: %ux%u -> %ux%u (%u%%%s), preset %c", f.renderW, f.renderH, f.outW, f.outH, scale,
+             scale >= 100 ? ", DLAA" : "", f.preset ? static_cast<char>('A' + f.preset - 1) : 'D');
     g_status = buf;
     return true;
 }

@@ -436,16 +436,31 @@ struct UpscaleFrame {
 } g_up;
 
 // Descriptor slots rewritten for the tonemap, put back when upscaling stops in case the game
-// keeps that table from frame to frame (if it builds it per frame, the game rewrites it anyway).
+// keeps that table from frame to frame. RE Village builds it per frame in a ring (a different
+// table most frames, 0.2.0 log): then the game rewrites the slot itself, and writing an old
+// value back could hit a slot the ring has since given to another draw, so nothing is put back.
 struct Patch {
     Slot slot;
     uint64_t firstFrame, lastFrame;
 };
 std::map<uint64_t, Patch> g_patches;  // by table handle
+bool g_tonemapRing = false;           // more than a few different tables seen
+
+void NotePatch(const Slot& slot, uint64_t frame) {
+    if (g_tonemapRing) return;
+    auto it = g_patches.find(slot.table.handle);
+    if (it == g_patches.end()) it = g_patches.emplace(slot.table.handle, Patch{slot, frame, frame}).first;
+    it->second.lastFrame = frame;
+    if (g_patches.size() > 4) {
+        g_tonemapRing = true;
+        g_patches.clear();
+        Log("tonemap descriptor tables are built per frame (ring): nothing to put back");
+    }
+}
 
 void UnpatchAll(device* dev) {
     for (auto& [handle, p] : g_patches) {
-        if (p.lastFrame - p.firstFrame < 3 || !p.slot.view.handle) continue;  // rebuilt every frame: leave it
+        if (p.lastFrame - p.firstFrame < 3 || !p.slot.view.handle) continue;  // not kept across frames
         descriptor_table_update u = {};
         u.table = p.slot.table;
         u.binding = p.slot.binding;
@@ -588,9 +603,7 @@ bool OnTonemap(command_list* cl, ListState& s) {
     if (!SceneInfoCopy(dev, scene, g_x.w, g_x.h, &cb)) return false;
 
     // The colour slot now shows X (the render-size draw that read it is skipped).
-    auto it = g_patches.find(slot.table.handle);
-    if (it == g_patches.end()) it = g_patches.emplace(slot.table.handle, Patch{slot, g_frame, g_frame}).first;
-    it->second.lastFrame = g_frame;
+    NotePatch(slot, g_frame);
     descriptor_table_update u = {};
     u.table = slot.table;
     u.binding = slot.binding;
