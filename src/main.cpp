@@ -924,7 +924,7 @@ void OnPresent(command_queue*, swapchain* sc, const rect*, const rect*, uint32_t
     bool down = pid == GetCurrentProcessId() && (GetAsyncKeyState(kCaptureHotkey) & 0x8000);
     if (down && !g_keyWasDown) StartCapture();
     g_keyWasDown = down;
-    rd::UpscalerPresent();
+    rd::UpscalerPresent(sc);
 }
 
 // ---------------------------------------------------------------- overlay
