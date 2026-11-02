@@ -1,4 +1,4 @@
-// DLSS in place of the game's TAA (docs/FINDINGS.md).
+﻿// DLSS in place of the game's TAA (docs/FINDINGS.md).
 //
 // The TAA pass (pixel shader pscf113c28) is a full-screen draw reading t0 depth (reverse-Z), t1
 // the scene colour before exposure, t2 last frame's TAA output and t3 the velocity (NDC offset
@@ -116,9 +116,12 @@ std::string g_lastError;  // why the last TAA pass wasn't replaced
 std::string g_mode;       // "DLAA 3840x2160" / "upscaling 1920x1080 -> 3840x2160"
 uint64_t g_replaced = 0;
 
+std::string g_lastLogged;  // logged once per change, not every frame (a success in between doesn't count)
+
 void Fail(const std::string& why) {
     std::lock_guard<std::mutex> lock(g_statusMutex);
-    if (why != g_lastError) Log("DLSS: %s", why.c_str());
+    if (why != g_lastLogged) Log("DLSS: %s", why.c_str());
+    g_lastLogged = why;
     g_lastError = why;
 }
 
@@ -685,14 +688,31 @@ bool OnCopy(command_list* cl, ListState& s) {
     const resource target = ViewResource(s.rtvs[0]);
     if (!target.handle) return false;
     const resource_desc td = cl->get_device()->get_resource_desc(target);
-    if (td.texture.width != src.w || td.texture.height != src.h || td.texture.format != src.fmt) {
-        Fail("output target differs from the tonemapped image: game's upscaling used");
+    // A copy needs formats of one family, and fits into a target at least as large (copied to its
+    // top-left corner; the game's target may be padded at some render scales).
+    const bool sameFamily = format_to_typeless(td.texture.format) == format_to_typeless(src.fmt);
+    if (!sameFamily || td.texture.width < src.w || td.texture.height < src.h || td.texture.samples > 1) {
+        Fail("output target " + std::to_string(td.texture.width) + "x" + std::to_string(td.texture.height) + " format " +
+             std::to_string(static_cast<unsigned>(td.texture.format)) + " doesn't take the " + std::to_string(src.w) +
+             "x" + std::to_string(src.h) + " format " + std::to_string(static_cast<unsigned>(src.fmt)) +
+             " image: game's upscaling used");
         return false;
     }
     cl->draw(3, 1, 0, 0);
     Transition(cl, src, resource_usage::copy_source);
     cl->barrier(target, resource_usage::render_target, resource_usage::copy_dest);
-    cl->copy_resource(src.res, target);
+    if (td.texture.width == src.w && td.texture.height == src.h && td.texture.format == src.fmt) {
+        cl->copy_resource(src.res, target);
+    } else {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            Log("output target %ux%u format %u, image %ux%u format %u: copied to its corner", td.texture.width,
+                td.texture.height, static_cast<unsigned>(td.texture.format), src.w, src.h, static_cast<unsigned>(src.fmt));
+        }
+        const subresource_box box = {0, 0, 0, src.w, src.h, 1};
+        cl->copy_texture_region(src.res, 0, &box, target, 0, nullptr, filter_mode::min_mag_mip_point);
+    }
     cl->barrier(target, resource_usage::copy_dest, resource_usage::render_target);
     Transition(cl, src, resource_usage::render_target);
     g_up.active = false;
