@@ -32,7 +32,10 @@
 
 #include "common.hpp"
 
+#include <atomic>
 #include <cmath>
+#include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <map>
 #include <mutex>
@@ -52,6 +55,7 @@ constexpr uint32_t kTaaPs = 0xcf113c28;      // PreTonemap2_PS
 constexpr uint32_t kBloomPs = 0x77ae4c63;    // NewFinal
 constexpr uint32_t kTonemapPs = 0x3cc6333b;  // LDRPostProcess_WithTonemap
 constexpr uint32_t kCopyPs = 0x48155d5e;     // CopyImageWithDepthPS
+constexpr uint32_t kSharpenPs = 0x8195a264;  // Sharpness_PS
 constexpr int kToggleHotkey = VK_F9;
 
 // SceneInfo (cb0 of the TAA and tonemap shaders), as float indices.
@@ -70,6 +74,8 @@ struct Settings {
     int preset = 11;       // NVSDK_NGX_DLSS_Hint_Render_Preset_K (transformer); 0 = DLSS default
     bool flipJitterX = false, flipJitterY = false;  // testing: jitter sign
     bool upscale = true;   // below the output size: DLSS to output size (else DLAA at render size)
+    bool sharpen = true;   // the game's sharpening at output size when upscaling
+    bool textureDetail = true;  // negative mip bias on material samplers (applied at game start)
 } g_set;
 
 void LoadSettings() {
@@ -78,6 +84,8 @@ void LoadSettings() {
     reshade::get_config_value(nullptr, RD_PRODUCT, "FlipJitterX", g_set.flipJitterX);
     reshade::get_config_value(nullptr, RD_PRODUCT, "FlipJitterY", g_set.flipJitterY);
     reshade::get_config_value(nullptr, RD_PRODUCT, "Upscale", g_set.upscale);
+    reshade::get_config_value(nullptr, RD_PRODUCT, "Sharpen", g_set.sharpen);
+    reshade::get_config_value(nullptr, RD_PRODUCT, "TextureDetail", g_set.textureDetail);
 }
 
 void SaveSettings() {
@@ -86,6 +94,8 @@ void SaveSettings() {
     reshade::set_config_value(nullptr, RD_PRODUCT, "FlipJitterX", g_set.flipJitterX);
     reshade::set_config_value(nullptr, RD_PRODUCT, "FlipJitterY", g_set.flipJitterY);
     reshade::set_config_value(nullptr, RD_PRODUCT, "Upscale", g_set.upscale);
+    reshade::set_config_value(nullptr, RD_PRODUCT, "Sharpen", g_set.sharpen);
+    reshade::set_config_value(nullptr, RD_PRODUCT, "TextureDetail", g_set.textureDetail);
 }
 
 std::mutex g_statusMutex;
@@ -354,6 +364,7 @@ struct Texture {
 };
 Texture g_x;  // DLSS output (UAV, render target for bloom, shader resource for the tonemap)
 Texture g_y;  // tonemapped output size image (upscaling)
+Texture g_z;  // sharpened output size image
 
 struct Old {
     resource res;
@@ -431,7 +442,8 @@ bool SceneInfoCopy(device* dev, const float* scene, uint32_t w, uint32_t h, buff
 // The frame being upscaled: set at TAA, used by the passes after it (one command list, in order).
 struct UpscaleFrame {
     bool active = false;  // set at TAA, cleared after the copy (or at the next TAA)
-    bool bloomDone = false, tonemapDone = false;
+    bool bloomDone = false, tonemapDone = false, sharpenDone = false;
+    Texture* final = nullptr;  // what goes over the game's stretch
     uint64_t lastFrame = UINT64_MAX;  // last present count with upscaling
 } g_up;
 
@@ -547,7 +559,8 @@ bool OnTaa(command_list* cl, ListState& s) {
         // use X.
         Restore(cl, s);
         g_up.active = true;
-        g_up.bloomDone = g_up.tonemapDone = false;
+        g_up.bloomDone = g_up.tonemapDone = g_up.sharpenDone = false;
+        g_up.final = nullptr;
         g_up.lastFrame = g_frame;
         replaced = false;
     } else {
@@ -581,39 +594,40 @@ void OnBloom(command_list* cl, ListState& s) {
     g_up.bloomDone = true;
 }
 
-// Tonemap at output size into Y, from X; the game's render-size draw is skipped.
-bool OnTonemap(command_list* cl, ListState& s) {
+// Draws the game's bound full-screen pass at output size instead of render size: pixel shader
+// register t<reg> rewritten (in its descriptor table) to src, SceneInfo replaced by a copy with
+// the output size, render target dst (created like the game's target). The game's render-size
+// draw is skipped. g_resMutex held.
+bool RedrawAtOutputSize(command_list* cl, ListState& s, uint32_t reg, Texture& src, Texture& dst, const char* name) {
     device* dev = cl->get_device();
-    std::lock_guard<std::mutex> lock(g_resMutex);
-    if (!g_up.active || g_up.tonemapDone || !g_x.srv.handle) return false;
     Slot slot;
     float scene[kSceneInfoFloats];
-    if (!PixelSrvSlot(dev, s.graphics, 1, &slot) || !ReadSceneInfo(dev, s.graphics, scene)) {
-        Fail("tonemap inputs not found: game's upscaling used");
+    if (!PixelSrvSlot(dev, s.graphics, reg, &slot) || !ReadSceneInfo(dev, s.graphics, scene)) {
+        Fail(std::string(name) + " inputs not found: game's upscaling used");
         return false;
     }
     const resource target = ViewResource(s.rtvs[0]);
     if (!target.handle) return false;
     const format fmt = dev->get_resource_desc(target).texture.format;
-    if (!Ensure(dev, g_y, g_x.w, g_x.h, fmt,
+    if (!Ensure(dev, dst, src.w, src.h, fmt,
                 resource_usage::render_target | resource_usage::copy_source | resource_usage::shader_resource,
-                resource_usage::render_target, "tonemapped"))
+                resource_usage::render_target, name))
         return false;
     buffer_range cb;
-    if (!SceneInfoCopy(dev, scene, g_x.w, g_x.h, &cb)) return false;
+    if (!SceneInfoCopy(dev, scene, src.w, src.h, &cb)) return false;
 
-    // The colour slot now shows X (the render-size draw that read it is skipped).
+    // The slot now shows src (the render-size draw that read it is skipped).
     NotePatch(slot, g_frame);
     descriptor_table_update u = {};
     u.table = slot.table;
     u.binding = slot.binding;
     u.count = 1;
     u.type = slot.type;
-    u.descriptors = &g_x.srv;
+    u.descriptors = &src.srv;
     dev->update_descriptor_tables(1, &u);
 
-    Transition(cl, g_x, resource_usage::shader_resource);
-    Transition(cl, g_y, resource_usage::render_target);
+    Transition(cl, src, resource_usage::shader_resource);
+    Transition(cl, dst, resource_usage::render_target);
     for (uint32_t param : SceneInfoParams(dev, s.graphics)) {
         descriptor_table_update cu = {};
         cu.count = 1;
@@ -621,39 +635,60 @@ bool OnTonemap(command_list* cl, ListState& s) {
         cu.descriptors = &cb;
         cl->push_descriptors(s.graphics.roots.at(param).stages, s.graphics.layout, param, cu);
     }
-    BindFullTarget(cl, g_y.rtv, g_y.w, g_y.h);
+    BindFullTarget(cl, dst.rtv, dst.w, dst.h);
     cl->draw(3, 1, 0, 0);
     Restore(cl, s);  // puts the game's SceneInfo back
     RestoreTargets(cl, s);
+    return true;
+}
+
+// Tonemap (reads t1) at output size into Y, from X.
+bool OnTonemap(command_list* cl, ListState& s) {
+    std::lock_guard<std::mutex> lock(g_resMutex);
+    if (!g_up.active || g_up.tonemapDone || !g_x.srv.handle) return false;
+    if (!RedrawAtOutputSize(cl, s, 1, g_x, g_y, "tonemapped")) return false;
     g_up.tonemapDone = true;
+    g_up.final = &g_y;
+    return true;
+}
+
+// The game's sharpening (Sharpness_PS, reads t0, the game's Sharpness setting) at output size
+// into Z, from Y.
+bool OnSharpen(command_list* cl, ListState& s) {
+    std::lock_guard<std::mutex> lock(g_resMutex);
+    if (!g_up.active || !g_up.tonemapDone || g_up.sharpenDone || !g_set.sharpen || !g_y.srv.handle) return false;
+    if (!RedrawAtOutputSize(cl, s, 0, g_y, g_z, "sharpened")) return false;
+    g_up.sharpenDone = true;
+    g_up.final = &g_z;
     return true;
 }
 
 // The game's stretch to output size: its draw runs (it also writes the output-size depth), then
-// Y goes over its colour.
+// the output-size image (Y, or Z when sharpened) goes over its colour.
 bool OnCopy(command_list* cl, ListState& s) {
     std::lock_guard<std::mutex> lock(g_resMutex);
-    if (!g_up.active || !g_up.tonemapDone || !g_y.res.handle) return false;
+    if (!g_up.active || !g_up.tonemapDone || !g_up.final || !g_up.final->res.handle) return false;
+    Texture& src = *g_up.final;
     const resource target = ViewResource(s.rtvs[0]);
     if (!target.handle) return false;
     const resource_desc td = cl->get_device()->get_resource_desc(target);
-    if (td.texture.width != g_y.w || td.texture.height != g_y.h || td.texture.format != g_y.fmt) {
+    if (td.texture.width != src.w || td.texture.height != src.h || td.texture.format != src.fmt) {
         Fail("output target differs from the tonemapped image: game's upscaling used");
         return false;
     }
     cl->draw(3, 1, 0, 0);
-    Transition(cl, g_y, resource_usage::copy_source);
+    Transition(cl, src, resource_usage::copy_source);
     cl->barrier(target, resource_usage::render_target, resource_usage::copy_dest);
-    cl->copy_resource(g_y.res, target);
+    cl->copy_resource(src.res, target);
     cl->barrier(target, resource_usage::copy_dest, resource_usage::render_target);
-    Transition(cl, g_y, resource_usage::render_target);
+    Transition(cl, src, resource_usage::render_target);
     g_up.active = false;
     return true;
 }
 
 void DestroyAll(device* dev) {
     dlss::Shutdown();
-    for (Texture* t : {&g_x, &g_y}) Retire(*t);
+    for (Texture* t : {&g_x, &g_y, &g_z}) Retire(*t);
     for (Old& o : g_old) {
         if (o.srv.handle) dev->destroy_resource_view(o.srv);
         if (o.rtv.handle) dev->destroy_resource_view(o.rtv);
@@ -674,8 +709,43 @@ void OnDestroyDevice(device* dev) {
     if (dev == g_dev) DestroyAll(dev);
 }
 
+// ---------------------------------------------------------------- texture detail
+//
+// At a lower render size the GPU picks smaller mip levels, so textures look blurrier than at
+// native. DLSS's guidance: a mip bias of log2(render width / output width). Samplers are made
+// when the game starts, so the bias comes from the render scale at that time (the Image Quality
+// in config.ini) and a change needs a restart. Only material samplers get it: anisotropic or
+// trilinear with wrapping addressing (post-processing uses clamped ones).
+
+float g_mipBias = 0;
+std::atomic<uint32_t> g_samplersBiased{0}, g_samplersOther{0};
+
+float StartupRenderScale() {
+    FILE* f = _wfopen((ExeDir() + L"config.ini").c_str(), L"r");
+    if (!f) return 1;
+    char line[256];
+    float scale = 1;
+    while (fgets(line, sizeof(line), f))
+        if (!strncmp(line, "ImageQualityRate=", 17)) scale = static_cast<float>(atof(line + 17));
+    fclose(f);
+    return scale > 0.2f && scale < 4 ? scale : 1;
+}
+
+bool OnCreateSampler(device*, sampler_desc& d) {
+    const bool material = (d.filter == filter_mode::anisotropic || d.filter == filter_mode::min_mag_mip_linear) &&
+                          d.address_u == texture_address_mode::wrap && d.max_lod > d.min_lod;
+    if (!material || g_mipBias == 0) {
+        ++g_samplersOther;
+        return false;
+    }
+    d.mip_lod_bias += g_mipBias;
+    ++g_samplersBiased;
+    return true;
+}
+
 bool g_keyWasDown = false;
 bool g_wasEnabled = false;
+bool g_samplerStatsLogged = false;
 
 }  // namespace
 
@@ -687,6 +757,7 @@ bool UpscalerOnDraw(command_list* cl, uint32_t vertices, uint32_t instances) {
         case kTaaPs: return OnTaa(cl, *s);
         case kBloomPs: OnBloom(cl, *s); return false;
         case kTonemapPs: return OnTonemap(cl, *s);
+        case kSharpenPs: return OnSharpen(cl, *s);
         case kCopyPs: return OnCopy(cl, *s);
         default: return false;
     }
@@ -724,6 +795,10 @@ void UpscalerPresent(swapchain* sc) {
     }
     g_keyWasDown = down;
     g_wasEnabled = g_set.enabled;
+    if (!g_samplerStatsLogged && g_frame > 600) {
+        g_samplerStatsLogged = true;
+        Log("samplers: %u material ones biased by %.2f, %u others", g_samplersBiased.load(), g_mipBias, g_samplersOther.load());
+    }
 }
 
 void UpscalerOverlay() {
@@ -736,6 +811,9 @@ void UpscalerOverlay() {
         g_set.preset = idx == 1 ? 10 : idx == 2 ? 11 : 0;
         changed = true;
     }
+    changed |= ImGui::Checkbox("Game sharpening at output size", &g_set.sharpen);
+    changed |= ImGui::Checkbox("Sharper textures at lower render sizes (needs a restart)", &g_set.textureDetail);
+    ImGui::TextDisabled("Texture mip bias now: %.2f (%u samplers)", g_mipBias, g_samplersBiased.load());
     if (ImGui::TreeNode("Testing")) {
         changed |= ImGui::Checkbox("Flip jitter X", &g_set.flipJitterX);
         ImGui::SameLine();
@@ -767,6 +845,10 @@ void UpscalerInit() {
     reshade::register_event<reshade::addon_event::bind_viewports>(&OnBindViewports);
     reshade::register_event<reshade::addon_event::bind_scissor_rects>(&OnBindScissors);
     reshade::register_event<reshade::addon_event::destroy_device>(&OnDestroyDevice);
+    reshade::register_event<reshade::addon_event::create_sampler>(&OnCreateSampler);
+    const float scale = StartupRenderScale();
+    if (g_set.enabled && g_set.upscale && g_set.textureDetail && scale < 0.99f) g_mipBias = std::log2(scale);
+    Log("texture mip bias %.2f (Image Quality %.2f at start)", g_mipBias, scale);
     Log("DLSS %s at start (F9 toggles), upscaling %s", g_set.enabled ? "on" : "off", g_set.upscale ? "on" : "off");
 }
 
@@ -782,6 +864,7 @@ void UpscalerShutdown() {
     reshade::unregister_event<reshade::addon_event::bind_viewports>(&OnBindViewports);
     reshade::unregister_event<reshade::addon_event::bind_scissor_rects>(&OnBindScissors);
     reshade::unregister_event<reshade::addon_event::destroy_device>(&OnDestroyDevice);
+    reshade::unregister_event<reshade::addon_event::create_sampler>(&OnCreateSampler);
 }
 
 }  // namespace rd
