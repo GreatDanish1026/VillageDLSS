@@ -255,7 +255,7 @@ bool CameraCut(const float* scene) {
     for (int r = 0; r < 3; ++r)
         for (int c = 0; c < 3; ++c)
             diff = std::fmax(diff, std::fabs(scene[kViewProj + r * 4 + c] - scene[kPrevViewProj + r * 4 + c]));
-    return diff > 0.5f || !std::isfinite(diff);
+    return diff > 1.0f || !std::isfinite(diff);
 }
 
 // ---------------------------------------------------------------- DLSS output texture
