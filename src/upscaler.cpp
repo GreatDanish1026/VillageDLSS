@@ -1,4 +1,4 @@
-// DLSS in place of the game's TAA (docs/FINDINGS.md).
+﻿// DLSS in place of the game's TAA (docs/FINDINGS.md).
 //
 // The TAA pass (pixel shader pscf113c28) is a full-screen draw reading t0 depth (reverse-Z), t1
 // the scene colour before exposure, t2 last frame's TAA output and t3 the velocity (NDC offset
@@ -72,7 +72,7 @@ constexpr uint32_t kSceneInfoSlots = 192;
 // ---------------------------------------------------------------- settings
 
 struct Settings {
-    bool enabled = false;  // F9; remembered across launches
+    bool enabled = true;   // F9; remembered across launches (on for a new install)
     int preset = 11;       // NVSDK_NGX_DLSS_Hint_Render_Preset_K (transformer); 0 = DLSS default
     bool flipJitterX = false, flipJitterY = false;  // testing: jitter sign
     bool upscale = true;   // below the output size: DLSS to output size (else DLAA at render size)

@@ -902,6 +902,7 @@ void StartCapture() {
 }
 
 bool g_keyWasDown = false;
+bool g_captureHotkey = false;  // F10, off unless ReShade.ini [VillageDLSS] CaptureHotkey=1
 
 void OnPresent(command_queue*, swapchain* sc, const rect*, const rect*, uint32_t, const rect*) {
     if (g_capture.load() == Capture::Recording) {
@@ -918,12 +919,14 @@ void OnPresent(command_queue*, swapchain* sc, const rect*, const rect*, uint32_t
             g_capture = Capture::Idle;
         }
     }
-    HWND fg = GetForegroundWindow();
-    DWORD pid = 0;
-    GetWindowThreadProcessId(fg, &pid);
-    bool down = pid == GetCurrentProcessId() && (GetAsyncKeyState(kCaptureHotkey) & 0x8000);
-    if (down && !g_keyWasDown) StartCapture();
-    g_keyWasDown = down;
+    if (g_captureHotkey) {  // development only: ReShade.ini [VillageDLSS] CaptureHotkey=1
+        HWND fg = GetForegroundWindow();
+        DWORD pid = 0;
+        GetWindowThreadProcessId(fg, &pid);
+        bool down = pid == GetCurrentProcessId() && (GetAsyncKeyState(kCaptureHotkey) & 0x8000);
+        if (down && !g_keyWasDown) StartCapture();
+        g_keyWasDown = down;
+    }
     rd::UpscalerPresent(sc);
 }
 
@@ -932,14 +935,18 @@ void OnPresent(command_queue*, swapchain* sc, const rect*, const rect*, uint32_t
 void DrawOverlay(effect_runtime*) {
     ImGui::TextDisabled(RD_PRODUCT " " RD_VERSION);
     rd::UpscalerOverlay();
-    ImGui::SeparatorText("Frame capture (for development)");
+    if (!ImGui::TreeNode("Development: frame capture")) return;
+    ImGui::TextDisabled("Writes two frames of GPU work to VillageDLSS-frame-N.txt (for finding passes).");
     ImGui::BeginDisabled(g_capture.load() != Capture::Idle);
-    if (ImGui::Button("Capture frame (F10)")) StartCapture();
+    if (ImGui::Button(g_captureHotkey ? "Capture frame (F10)" : "Capture frame")) StartCapture();
     ImGui::EndDisabled();
     ImGui::SameLine();
     ImGui::TextDisabled("%s", g_capture.load() == Capture::Recording ? "recording..." : g_status.c_str());
-    std::lock_guard<std::mutex> lock(g_pipeMutex);
-    ImGui::TextDisabled("%zu compute and %zu graphics pipelines known", g_computePipes, g_graphicsPipes);
+    {
+        std::lock_guard<std::mutex> lock(g_pipeMutex);
+        ImGui::TextDisabled("%zu compute and %zu graphics pipelines known", g_computePipes, g_graphicsPipes);
+    }
+    ImGui::TreePop();
 }
 
 }  // namespace
@@ -976,6 +983,7 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
             g_self = module;
             g_veh = AddVectoredExceptionHandler(1, &OnException);
             LoadDumpList();
+            reshade::get_config_value(nullptr, RD_PRODUCT, "CaptureHotkey", g_captureHotkey);
             descriptor_tracking::register_events();
             reshade::register_event<reshade::addon_event::init_resource>(&OnInitResource);
             reshade::register_event<reshade::addon_event::destroy_resource>(&OnDestroyResource);
