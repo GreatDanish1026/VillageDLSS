@@ -241,7 +241,7 @@ std::vector<Decl> ParseDecls(const uint8_t* p, size_t n) {
     return out;
 }
 
-std::unordered_set<uint32_t> g_dumpPs, g_dumpCs;  // from ReShade.ini [VillageDLSS] DumpShaders
+std::unordered_set<uint32_t> g_dumpPs, g_dumpCs, g_dumpVs;  // from ReShade.ini [VillageDLSS] DumpShaders
 
 // Shaders in the dump list also get their bytecode saved as VillageDLSS-<id>.cso (once a run).
 void SaveBytecode(const char* prefix, uint32_t id, const void* code, size_t size) {
@@ -265,6 +265,7 @@ uint32_t ShaderHash(const pipeline_subobject& s) {
     const uint32_t id = Fnv(d.code, d.code_size);
     if (s.type == pipeline_subobject_type::pixel_shader && g_dumpPs.count(id)) SaveBytecode("ps", id, d.code, d.code_size);
     if (s.type == pipeline_subobject_type::compute_shader && g_dumpCs.count(id)) SaveBytecode("cs", id, d.code, d.code_size);
+    if (s.type == pipeline_subobject_type::vertex_shader && g_dumpVs.count(id)) SaveBytecode("vs", id, d.code, d.code_size);
     std::vector<Decl> decls = ParseDecls(static_cast<const uint8_t*>(d.code), d.code_size);
     std::lock_guard<std::mutex> lock(g_pipeMutex);
     g_decls[id] = std::move(decls);
@@ -330,6 +331,7 @@ void LoadDumpList() {
         const uint32_t id = static_cast<uint32_t>(strtoul(t.c_str() + 2, nullptr, 16));
         if (t.compare(0, 2, "ps") == 0) g_dumpPs.insert(id);
         else if (t.compare(0, 2, "cs") == 0) g_dumpCs.insert(id);
+        else if (t.compare(0, 2, "vs") == 0) g_dumpVs.insert(id);  // bytecode only
     }
     Log("dumping constants for %zu pixel and %zu compute shaders", g_dumpPs.size(), g_dumpCs.size());
 }
