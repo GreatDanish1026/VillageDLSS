@@ -116,6 +116,17 @@ LONG CALLBACK OnException(EXCEPTION_POINTERS* e) {
     if (code != EXCEPTION_ACCESS_VIOLATION && code != EXCEPTION_ILLEGAL_INSTRUCTION && code != EXCEPTION_STACK_OVERFLOW &&
         code != 0xC0000409 /* fail fast */)
         return EXCEPTION_CONTINUE_SEARCH;
+    // Only faults with this add-on on the stack (frame 0 is this handler, so it's skipped):
+    // others, such as REFramework's handled ones at startup, aren't ours.
+    void* frames[32];
+    const USHORT count = RtlCaptureStackBackTrace(0, 32, frames, nullptr);
+    bool ours = false;
+    for (USHORT i = 1; i < count && !ours; ++i) {
+        HMODULE m = nullptr;
+        ours = GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
+                                  static_cast<LPCWSTR>(frames[i]), &m) && m == g_self;
+    }
+    if (!ours) return EXCEPTION_CONTINUE_SEARCH;
     const int n = ++g_faults;
     if (n > 3) return EXCEPTION_CONTINUE_SEARCH;
     void* at = e->ExceptionRecord->ExceptionAddress;
@@ -123,8 +134,6 @@ LONG CALLBACK OnException(EXCEPTION_POINTERS* e) {
     Log("EXCEPTION 0x%08lx at %s (thread %lu), info %llx %llx", code, where.c_str(), GetCurrentThreadId(),
         static_cast<unsigned long long>(e->ExceptionRecord->ExceptionInformation[0]),
         static_cast<unsigned long long>(e->ExceptionRecord->ExceptionInformation[1]));
-    void* frames[32];
-    const USHORT count = RtlCaptureStackBackTrace(0, 32, frames, nullptr);
     for (USHORT i = 0; i < count; ++i) Log("  stack %2u: %s", i, ModuleOffset(frames[i]).c_str());
     if (n == 1) {
         if (HMODULE dbghelp = LoadLibraryW(L"dbghelp.dll")) {
@@ -274,10 +283,60 @@ const char* FormatName(format f) {
     }
 }
 
-std::string Describe(device* dev, resource r) {
+// Live resources and views, recorded as the game creates and destroys them. Descriptor tracking
+// can return views of resources that have since been freed; asking ReShade about those reads
+// freed memory (0.0.2 crashed), so descriptions come from these maps instead.
+
+struct ViewInfo {
+    resource res;
+    resource_view_desc desc;
+};
+
+std::mutex g_resMutex;
+std::unordered_map<uint64_t, resource_desc> g_resources;
+std::unordered_map<uint64_t, ViewInfo> g_views;
+
+void OnInitResource(device*, const resource_desc& desc, const subresource_data*, resource_usage, resource r) {
+    std::lock_guard<std::mutex> lock(g_resMutex);
+    g_resources[r.handle] = desc;
+}
+
+void OnDestroyResource(device*, resource r) {
+    std::lock_guard<std::mutex> lock(g_resMutex);
+    g_resources.erase(r.handle);
+}
+
+void OnInitView(device*, resource r, resource_usage, const resource_view_desc& desc, resource_view v) {
+    std::lock_guard<std::mutex> lock(g_resMutex);
+    g_views[v.handle] = {r, desc};
+}
+
+void OnDestroyView(device*, resource_view v) {
+    std::lock_guard<std::mutex> lock(g_resMutex);
+    g_views.erase(v.handle);
+}
+
+bool FindView(resource_view v, ViewInfo* out) {
+    std::lock_guard<std::mutex> lock(g_resMutex);
+    auto it = g_views.find(v.handle);
+    if (it == g_views.end()) return false;
+    *out = it->second;
+    return true;
+}
+
+// live: the resource is in use by the call being recorded, so ReShade may be asked about it
+// when it isn't in the map (swap chain buffers).
+std::string Describe(device* dev, resource r, bool live = true) {
     if (!r.handle) return "null";
-    resource_desc d = dev->get_resource_desc(r);
     std::string id = Format("#%05llx", (r.handle >> 4) & 0xfffff);  // short, enough to follow one resource
+    resource_desc d;
+    {
+        std::lock_guard<std::mutex> lock(g_resMutex);
+        auto it = g_resources.find(r.handle);
+        if (it != g_resources.end()) d = it->second;
+        else if (!live) return id + " (freed)";
+        else d = dev->get_resource_desc(r);
+    }
     if (d.type == resource_type::buffer) return id + Format(" buf %llu", d.buffer.size);
     const char* fn = FormatName(d.texture.format);
     std::string fmt = fn ? fn : Format("fmt%u", static_cast<uint32_t>(d.texture.format));
@@ -450,16 +509,24 @@ void WriteBindings(device* dev, ListLog& l, const Bindings& b, bool dump) {
                 if (range.type == descriptor_type::constant_buffer) {
                     const buffer_range cb = dt->get_buffer_range(heap, offset);
                     if (!cb.buffer.handle) continue;
-                    what = Format("cbv %s +%llu", Describe(dev, cb.buffer).c_str(), cb.offset);
+                    what = Format("cbv %s +%llu", Describe(dev, cb.buffer, false).c_str(), cb.offset);
                     AddLocked(l, Format("    table param %u: b%u space%u = %s", param, range.dx_register_index + k,
                                         range.dx_register_space, what.c_str()));
-                    if (dump) DumpBuffer(dev, l, Format("b%u", range.dx_register_index + k).c_str(), cb);
+                    if (dump && what.find("(freed)") == std::string::npos)
+                        DumpBuffer(dev, l, Format("b%u", range.dx_register_index + k).c_str(), cb);
                     continue;
                 }
                 const resource_view v = dt->get_resource_view(heap, offset);
                 if (!v.handle) continue;
-                const resource_view_desc vd = dev->get_resource_view_desc(v);
-                what = Describe(dev, dev->get_resource_from_view(v));
+                ViewInfo info;
+                if (!FindView(v, &info)) {
+                    AddLocked(l, Format("    table param %u: %c%u space%u = view %llx (unknown)", param,
+                                        RegisterLetter(range.type), range.dx_register_index + k, range.dx_register_space,
+                                        v.handle));
+                    continue;
+                }
+                const resource_view_desc& vd = info.desc;
+                what = Describe(dev, info.res, false);
                 if (const char* fn = FormatName(vd.format)) what += Format(" as %s", fn);
                 if (vd.type == resource_view_type::texture_2d && vd.texture.first_level)
                     what += Format(" mip%u", vd.texture.first_level);
@@ -532,10 +599,13 @@ void OnBindViewports(command_list* cl, uint32_t first, uint32_t count, const vie
 void OnBindRenderTargets(command_list* cl, uint32_t count, const resource_view* rtvs, resource_view dsv) {
     if (!Recording()) return;
     device* dev = cl->get_device();
+    auto view = [dev](resource_view v) {
+        ViewInfo info;
+        return FindView(v, &info) ? Describe(dev, info.res) : Describe(dev, dev->get_resource_from_view(v));
+    };
     std::string s;
-    for (uint32_t i = 0; i < count; ++i)
-        s += " " + (rtvs[i].handle ? Describe(dev, dev->get_resource_from_view(rtvs[i])) : std::string("null"));
-    if (dsv.handle) s += " depth " + Describe(dev, dev->get_resource_from_view(dsv));
+    for (uint32_t i = 0; i < count; ++i) s += " " + (rtvs[i].handle ? view(rtvs[i]) : std::string("null"));
+    if (dsv.handle) s += " depth " + view(dsv);
     std::lock_guard<std::mutex> lock(g_capMutex);
     ListLog& l = List(cl);
     l.rts = s;
@@ -750,6 +820,10 @@ BOOL APIENTRY DllMain(HMODULE module, DWORD reason, LPVOID) {
             g_veh = AddVectoredExceptionHandler(1, &OnException);
             LoadDumpList();
             descriptor_tracking::register_events();
+            reshade::register_event<reshade::addon_event::init_resource>(&OnInitResource);
+            reshade::register_event<reshade::addon_event::destroy_resource>(&OnDestroyResource);
+            reshade::register_event<reshade::addon_event::init_resource_view>(&OnInitView);
+            reshade::register_event<reshade::addon_event::destroy_resource_view>(&OnDestroyView);
             reshade::register_event<reshade::addon_event::init_pipeline>(&OnInitPipeline);
             reshade::register_event<reshade::addon_event::destroy_pipeline>(&OnDestroyPipeline);
             reshade::register_event<reshade::addon_event::reset_command_list>(&OnReset);
