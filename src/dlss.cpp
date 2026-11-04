@@ -177,7 +177,16 @@ bool Init(ID3D12Device* device, std::string& error) {
     return true;
 }
 
-bool Evaluate(ID3D12GraphicsCommandList* list, const Inputs& in, std::string& error) {
+// The model for Automatic, by render scale: K down to Balanced (58%), M around Performance (50%),
+// L at Ultra Performance (33%). (The DLSS mode NGX reports can't tell: its ranges overlap.)
+int AutoPreset(unsigned renderW, unsigned outputW) {
+    const float r = outputW ? static_cast<float>(renderW) / outputW : 1.0f;
+    return r >= 0.54f ? 11 : r >= 0.42f ? 13 : 12;
+}
+
+bool Evaluate(ID3D12GraphicsCommandList* list, const Inputs& requested, std::string& error) {
+    Inputs in = requested;
+    if (in.preset == kPresetAuto) in.preset = AutoPreset(in.renderWidth, in.outputWidth);
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_ready) {
         error = g_initError.empty() ? "DLSS not started" : g_initError;

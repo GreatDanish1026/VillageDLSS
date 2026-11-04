@@ -7,6 +7,10 @@
 
 namespace dlss {
 
+// Inputs::preset value for "Automatic": the model NVIDIA recommends for the render scale (K
+// for DLAA, Quality and Balanced, M for Performance, L for Ultra Performance).
+constexpr int kPresetAuto = -1;
+
 struct Inputs {
     ID3D12Resource* color = nullptr;   // render resolution, linear HDR, jittered
     ID3D12Resource* depth = nullptr;   // render resolution, reversed Z
