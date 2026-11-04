@@ -1,4 +1,4 @@
-# VillageDLSS 1.0.0
+# VillageDLSS 1.0.1
 
 ReShade add-on for **Resident Evil Village** (RE Engine, DirectX 12) that replaces the game's
 TAA with **NVIDIA DLSS**. The game only has FSR 1 (a spatial upscaler); this gives it DLAA at
@@ -25,14 +25,14 @@ mode dropdown.
 - **Sharper textures at lower render sizes** (on by default): a mip bias of log2(render scale) on
   the game's material textures, as NVIDIA recommends for DLSS. Set when the game starts, so after
   changing the DLSS mode, restart the game for the textures to follow.
-- **DLSS model**: K (transformer, default), J, or NVIDIA's default.
+- **DLSS model**: Automatic (default: K, M at Performance, L at Ultra Performance, as NVIDIA recommends), or K, J, L or M (DLSS 4.5) at every resolution, or NVIDIA's default.
 
 Settings are in ReShade's Add-ons tab (Home key) under VillageDLSS, saved in `ReShade.ini` under
 `[VillageDLSS]`.
 
 ## Install
 
-**With Fluffy Mod Manager**: put `VillageDLSS-1.0.0.zip` in Fluffy Mod Manager's
+**With Fluffy Mod Manager**: put `VillageDLSS-1.0.1.zip` in Fluffy Mod Manager's
 `Games\RE8\Mods` folder (or drag it onto the manager) and enable it. It installs into the game
 folder:
 
