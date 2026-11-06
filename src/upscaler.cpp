@@ -77,6 +77,7 @@ constexpr uint32_t kTaaDepth = 0, kTaaColor = 1, kTaaMotion = 3;
 constexpr uint32_t kBloomPs = 0x77ae4c63;    // NewFinal
 constexpr bool kBloomIntoTaaOnly = false;     // (RE7's bloom shader also draws its smaller levels)
 constexpr uint32_t kTonemapPs = 0x3cc6333b;  // LDRPostProcess_WithTonemap (t0 depth, colour t1)
+constexpr uint32_t kTonemapPs2 = 4;            // (RE2/RE3: the other permutation; none known here)
 constexpr uint32_t kTonemapColor = 1;
 constexpr uint32_t kCopyPs = 0x48155d5e;     // CopyImageWithDepthPS: stretch to output size + depth
 constexpr uint32_t kSharpenPs = 0x8195a264;  // Sharpness_PS (t0, the game's sharpness setting)
@@ -1234,6 +1235,7 @@ bool UpscalerOnDraw(command_list* cl, uint32_t vertices, uint32_t instances) {
         case kTaaPs: return OnTaa(cl, *s);
         case kBloomPs: OnBloom(cl, *s); return false;
         case kTonemapPs: return OnTonemap(cl, *s);
+        case kTonemapPs2: return OnTonemap(cl, *s);
         case kSharpenPs: return OnSharpen(cl, *s);
         case kCopyPs: return OnCopy(cl, *s);
         default: return false;
