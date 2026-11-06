@@ -69,9 +69,9 @@ If the NVIDIA App has a DLSS model override for the game, it takes precedence ov
 ## Notes
 
 - Tested at 3840x2160 with HDR (RenoDX) on an NVIDIA RTX card, with REFramework: DLAA and every
-  upscaled render resolution down to Ultra Performance, with the same tone as DLAA. Frame
-  generation and FSR are the same code as RE7DLSS 1.1.1 and RE2DLSS/RE3DLSS 1.1.0, where they were
-  tested; not yet run in Village.
+  upscaled render resolution down to Ultra Performance, with the same tone as DLAA, and DLSS frame
+  generation 2x in exclusive full screen. FSR and FSR frame generation are the same code as
+  RE7DLSS 1.1.1, where they were tested.
 - Works with REFramework: REFramework hooks NVIDIA's frame generation DLL in a way that would hang
   the game at launch; the add-on steps around that hook while the game's swapchain is created.
 - FSR 3.1/4 and FSR frame generation through this add-on are untested on Radeon cards so far.
