@@ -76,6 +76,10 @@ constexpr uint32_t kTaaPs = 0xcf113c28;      // PreTonemap2_PS: t0 depth, t1 col
 constexpr uint32_t kTaaDepth = 0, kTaaColor = 1, kTaaMotion = 3;
 constexpr uint32_t kBloomPs = 0x77ae4c63;    // NewFinal
 constexpr bool kBloomIntoTaaOnly = false;     // (RE7's bloom shader also draws its smaller levels)
+// Village: the bloom is drawn into X as well, and the game's draw still goes into its render-size
+// image (as in 1.0). Moving it to X instead left that image without bloom and changed the
+// picture's tone when upscaling (1.1.0 test: the game reads it again, likely for its exposure).
+constexpr bool kBloomAlsoAtRenderSize = true;
 constexpr uint32_t kTonemapPs = 0x3cc6333b;  // LDRPostProcess_WithTonemap (t0 depth, colour t1)
 constexpr uint32_t kTonemapPs2 = 4;            // (RE2/RE3: the other permutation; none known here)
 constexpr uint32_t kTonemapColor = 1;
@@ -838,8 +842,13 @@ void OnBloom(command_list* cl, ListState& s) {
     if (kBloomIntoTaaOnly && ViewResource(s.rtvs[0]) != g_up.taaOut) return;
     Transition(cl, g_x, resource_usage::render_target);
     BindFullTarget(cl, g_x.rtv, g_x.w, g_x.h);
-    s.redirected = true;
     g_up.bloomDone = true;
+    if (kBloomAlsoAtRenderSize) {  // drawn into X here; the game's own draw follows as usual
+        cl->draw(3, 1, 0, 0);
+        RestoreTargets(cl, s);
+        return;
+    }
+    s.redirected = true;
 }
 
 // Draws the game's bound full-screen pass at output size instead of render size: pixel shader
