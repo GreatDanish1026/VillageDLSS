@@ -68,11 +68,10 @@ If the NVIDIA App has a DLSS model override for the game, it takes precedence ov
 
 ## Notes
 
-- **1.1.0 is untested in Village** (the game isn't installed here): the FSR and frame generation
-  code is RE7DLSS 1.1.1's, tested in RE7 and RE2 (RE2DLSS 1.1.0). New in 1.1.0, Village's
-  bloom, tonemapping and sharpening are redirected to full resolution the way RE2DLSS, RE3DLSS and
-  RE7DLSS do it, instead of being drawn a second time. Please send `VillageDLSS.log` if something
-  doesn't work (1.0.1 is the previous, tested version).
+- Tested at 3840x2160 with HDR (RenoDX) on an NVIDIA RTX card, with REFramework: DLAA and every
+  upscaled render resolution down to Ultra Performance, with the same tone as DLAA. Frame
+  generation and FSR are the same code as RE7DLSS 1.1.1 and RE2DLSS/RE3DLSS 1.1.0, where they were
+  tested; not yet run in Village.
 - Works with REFramework: REFramework hooks NVIDIA's frame generation DLL in a way that would hang
   the game at launch; the add-on steps around that hook while the game's swapchain is created.
 - FSR 3.1/4 and FSR frame generation through this add-on are untested on Radeon cards so far.
