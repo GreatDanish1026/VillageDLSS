@@ -188,5 +188,5 @@ Village skips rayTracingUpscale on some frames: Ray Reconstruction is kept while
 60 frames, so DLSS doesn't switch features (and restart its history) every few frames. Depth is
 32-bit + stencil (view format r32_float_x8_uint, picked from the depth's format as in RE7DLSS).
 
-Test (2026-11-09, 4K HDR, RT on): RR at DLAA and Quality (2561x1440 -> 3840x2160), camera ok,
-models D/E/F, back to Super Resolution only across real ray tracing gaps at scene changes.
+Test (2026-11-09, 4K HDR, RT on): RR at DLAA and Quality (2561x1440 -> 3840x2160), camera ok, models NVIDIA default and F,
+back to Super Resolution only across real ray tracing gaps at scene changes.
