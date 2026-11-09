@@ -62,6 +62,8 @@
 #include "../third_party/reshade/utils/descriptor_tracking.hpp"
 #include "blit_ps.h"  // kBlitPs, kBlitVs: blit.hlsl compiled by build.ps1
 #include "blit_vs.h"
+#include "guide_cs.h"       // kGuideCs: guide.hlsl (Ray Reconstruction guides from the G-buffer)
+#include "guide_view_cs.h"  // kGuideViewCs: guide_view.hlsl (guide debug view)
 #include "dlss.hpp"
 #include "fsr.hpp"
 #include "version.h"
@@ -113,6 +115,15 @@ struct Settings {
     bool sharpen = true;   // the game's sharpening at output size when upscaling
     bool textureDetail = true;  // negative mip bias on material samplers (applied at game start)
     int mode = 0;          // DLSS mode setting the render scale through VillageDLSS.lua (0: the game's slider)
+    // DLSS Ray Reconstruction in place of Super Resolution while the game ray traces (ini
+    // RayReconstruction; experimental, off by default). rrPreset: NVSDK_NGX_RayReconstruction_Hint_Render_Preset_*
+    // (ini RrModel, 0 = NVIDIA's default). rrDenoise (ini RrDenoise): which of the game's ray tracing
+    // denoise passes are skipped: 0 none, 1 all but the spatial ones (they fill the sparse rays), 2 all.
+    // guideView: debug view of one guide (not saved).
+    bool rr = false;
+    int rrPreset = 0;
+    int rrDenoise = 0;
+    int guideView = 0;
 } g_set;
 
 struct Mode {
@@ -135,6 +146,11 @@ void LoadSettings() {
     reshade::get_config_value(nullptr, RD_PRODUCT, "TextureDetail", g_set.textureDetail);
     reshade::get_config_value(nullptr, RD_PRODUCT, "Mode", g_set.mode);
     if (g_set.mode < 0 || g_set.mode >= kModeCount) g_set.mode = 0;
+    reshade::get_config_value(nullptr, RD_PRODUCT, "RayReconstruction", g_set.rr);
+    reshade::get_config_value(nullptr, RD_PRODUCT, "RrModel", g_set.rrPreset);
+    if (g_set.rrPreset != 0 && (g_set.rrPreset < 4 || g_set.rrPreset > 6)) g_set.rrPreset = 0;
+    reshade::get_config_value(nullptr, RD_PRODUCT, "RrDenoise", g_set.rrDenoise);
+    if (g_set.rrDenoise < 0 || g_set.rrDenoise > 2) g_set.rrDenoise = 0;
 }
 
 void SaveSettings() {
@@ -147,6 +163,9 @@ void SaveSettings() {
     reshade::set_config_value(nullptr, RD_PRODUCT, "Sharpen", g_set.sharpen);
     reshade::set_config_value(nullptr, RD_PRODUCT, "TextureDetail", g_set.textureDetail);
     reshade::set_config_value(nullptr, RD_PRODUCT, "Mode", g_set.mode);
+    reshade::set_config_value(nullptr, RD_PRODUCT, "RayReconstruction", g_set.rr);
+    reshade::set_config_value(nullptr, RD_PRODUCT, "RrModel", g_set.rrPreset);
+    reshade::set_config_value(nullptr, RD_PRODUCT, "RrDenoise", g_set.rrDenoise);
 }
 
 std::mutex g_statusMutex;
@@ -561,6 +580,507 @@ void UnpatchAll(device* dev) {
 
 // ---------------------------------------------------------------- render size, frame generation
 
+// ---------------------------------------------------------------- Ray Reconstruction
+//
+// The game ray traces in compute shaders at half the render size and denoises the result itself
+// (docs/FINDINGS.md "Ray tracing chain"); rayTracingUpscale then adds it onto the scene colour at
+// full size, before the TAA. For Ray Reconstruction the game's denoise passes are skipped and the
+// signals from before them (the shading's own, or after the spatial passes that fill the sparse
+// rays) are copied into the textures rayTracingUpscale reads. At the TAA, guides are made from
+// the G-buffer that rayTracingUpscale reads, and DLSS-D runs in place of DLSS.
+
+// The game's ray tracing passes (docs/FINDINGS.md; names from RE2's DXIL, RE2DLSS docs/shaders/rt).
+// Village runs RE3/RE7's chain (no VFX signal: rayTracingUpscale reads three signals) with its own
+// shader builds and extra passes (ray binning, a denoise work queue); names and registers from the
+// dumps in docs/shaders/rt (RE3 id in brackets).
+constexpr uint32_t kRtShadeDiffuse = 0x7afe99a0;     // rayTracingShading: u0 shY, u1 cocg (fc23ed5b)
+constexpr uint32_t kRtShadeSpecular = 0x244a4781;    // rayTracingShading: u0 specular (de6f8914)
+constexpr uint32_t kRtShadeVfx = 4;                  // (RE2 only)
+constexpr uint32_t kRtSpatialDiffuse = 0x7f4c08ac;   // rayTracingSpatialAccumulation: u0 shY, u1 cocg (d6792963)
+constexpr uint32_t kRtSpatialSpecular = 0x8e128757;  // rayTracingSpatialAccumulation: u0 specular (25501ade)
+constexpr uint32_t kRtSpatialVfx = 5;                // (RE2 only)
+constexpr uint32_t kRtVfxMedian = 6;                 // (RE2 only)
+constexpr uint32_t kRtMeanVariance = 0x01ea4198;     // rayTracingMeanVariance (0af21e0f)
+constexpr uint32_t kRtTemporalSpecular = 0x946de26d;  // rayTracingTemporalAccumulation, specular (a4fd0f93)
+constexpr uint32_t kRtTemporalDiffuse = 0x9f40a58c;   // rayTracingTemporalAccumulation, diffuse (94984fd1)
+constexpr uint32_t kRtDeflicker = 0xc374e480;         // rayTracingDeflickerSpecular (091f2a20)
+constexpr uint32_t kRtBilateral = 0x9514a55e;         // rayTracingBilateralFilter (905f94bf)
+constexpr uint32_t kRtTemporalVfx = 7;                // (RE2 only)
+constexpr uint32_t kRtUpscale = 0x4206d838;           // rayTracingUpscale: t2 base colour, t3 normal, t5-t7 signals (4e928452)
+constexpr uint32_t kUpBase = 2, kUpNormal = 3, kUpSignal = 5;  // t5 shY, t6 cocg, t7 specular
+constexpr uint32_t kRtSignals = 3;
+
+const char* const kRrDenoiseNames[] = {"Game's denoiser, Ray Reconstruction on top (recommended)",
+                                       "Skip all but the spatial passes (experimental)", "Skip all: raw rays (experimental)"};
+const char* const kGuideViewNames[] = {"Off", "Diffuse albedo", "Specular albedo", "Normals", "Roughness"};
+constexpr int kGuideViewCount = 5;
+
+std::mutex g_rtMutex;  // everything in this section
+struct RtState {
+    uint64_t signalFrame = UINT64_MAX;  // g_frame when the signals below were seen
+    resource signal[4] = {};            // shY, cocg, specular, VFX specular: what replaces the denoised ones
+    uint64_t upscaleFrame = UINT64_MAX;  // g_frame when rayTracingUpscale ran
+    resource base = {0}, normal = {0};   // its G-buffer
+    uint64_t rrFrame = UINT64_MAX;       // g_frame when Ray Reconstruction last ran
+    uint64_t rrFrames = 0, skipped = 0, copied = 0;
+    std::string error;                   // why Ray Reconstruction isn't running (overlay)
+    std::map<uint64_t, resource_usage> states;  // last recorded state of the textures above
+    std::map<std::pair<uint64_t, uint32_t>, resource_view> views;  // ours, by resource and kind/format
+    // Guides (render size), ours.
+    resource guide[3] = {};
+    resource_view guideUav[3] = {};
+    uint32_t guideW = 0, guideH = 0;
+    pipeline_layout layout = {0}, viewLayout = {0};
+    pipeline pipe = {0}, viewPipe = {0};
+    bool pipesFailed = false;
+    bool loggedMatrices = false;
+} g_rt;
+
+void RtWatch(resource r) {
+    if (r.handle && !g_rt.states.count(r.handle)) g_rt.states[r.handle] = resource_usage::undefined;
+}
+
+void RtOnBarrier(uint32_t count, const resource* res, const resource_usage* after) {
+    std::lock_guard<std::mutex> lock(g_rtMutex);
+    if (g_rt.states.empty()) return;
+    for (uint32_t i = 0; i < count; ++i) {
+        auto it = g_rt.states.find(res[i].handle);
+        if (it != g_rt.states.end()) it->second = after[i];
+    }
+}
+
+void RtOnDestroyResource(device* dev, resource r) {
+    std::lock_guard<std::mutex> lock(g_rtMutex);
+    g_rt.states.erase(r.handle);
+    for (auto it = g_rt.views.begin(); it != g_rt.views.end();) {
+        if (it->first.first == r.handle) {
+            dev->destroy_resource_view(it->second);
+            it = g_rt.views.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    for (resource& s : g_rt.signal)
+        if (s == r) s = {0};
+    if (g_rt.base == r) g_rt.base = {0};
+    if (g_rt.normal == r) g_rt.normal = {0};
+}
+
+// A view of ours on <r> (cached until the resource goes).
+resource_view RtView(device* dev, resource r, format f, bool uav) {
+    const auto key = std::make_pair(r.handle, (static_cast<uint32_t>(f) << 1) | (uav ? 1u : 0u));
+    auto it = g_rt.views.find(key);
+    if (it != g_rt.views.end()) return it->second;
+    resource_view v = {0};
+    if (!dev->create_resource_view(r, uav ? resource_usage::unordered_access : resource_usage::shader_resource,
+                                   resource_view_desc(f), &v))
+        return {0};
+    g_rt.views[key] = v;
+    return v;
+}
+
+// The resource at register <reg> (t# or u#) of the bound compute tables.
+resource ComputeView(device* dev, const StageState& st, uint32_t reg, bool uav) {
+    descriptor_tracking* dt = dev->get_private_data<descriptor_tracking>();
+    if (!dt) return {0};
+    for (uint32_t i = 0; i < st.tables.size(); ++i) {
+        if (!st.tables[i].handle) continue;
+        const pipeline_layout_param p = dt->get_pipeline_layout_param(st.layout, i);
+        if (p.type != pipeline_layout_param_type::descriptor_table || !p.descriptor_table.ranges) continue;
+        for (uint32_t r = 0; r < p.descriptor_table.count; ++r) {
+            const descriptor_range& range = p.descriptor_table.ranges[r];
+            const bool isUav = range.type == descriptor_type::unordered_access_view ||
+                               range.type == descriptor_type::texture_unordered_access_view;
+            const bool isSrv = range.type == descriptor_type::shader_resource_view ||
+                               range.type == descriptor_type::texture_shader_resource_view;
+            if ((uav ? !isUav : !isSrv) || range.dx_register_space != 0) continue;
+            if (reg < range.dx_register_index || reg - range.dx_register_index >= range.count) continue;
+            descriptor_heap heap = {0};
+            uint32_t offset = 0;
+            dev->get_descriptor_heap_offset(st.tables[i], range.binding + (reg - range.dx_register_index), 0, &heap,
+                                            &offset);
+            return ViewResource(dt->get_resource_view(heap, offset));
+        }
+    }
+    return {0};
+}
+
+// Ray Reconstruction is chosen and can run with the upscaler in use.
+bool RrChosen() {
+    std::string why;
+    return g_set.enabled && g_set.rr && g_active == Tech::Dlss && dlss::RrAvailable(&why);
+}
+
+// The game's denoise passes are skipped while Ray Reconstruction ran last frame (so the first frame
+// with it, and every frame after it stops, keeps the game's).
+bool RtSkipping(uint64_t frame) {
+    return RrChosen() && g_set.rrDenoise > 0 && g_rt.rrFrame != UINT64_MAX && g_rt.rrFrame + 2 >= frame;
+}
+
+bool RtIsSkipped(uint32_t id) {
+    switch (id) {
+        case kRtMeanVariance: case kRtTemporalSpecular: case kRtTemporalDiffuse: case kRtDeflicker: case kRtBilateral:
+        case kRtTemporalVfx:
+            return true;
+        case kRtSpatialDiffuse: case kRtSpatialSpecular: case kRtSpatialVfx: case kRtVfxMedian:
+            return g_set.rrDenoise == 2;
+        default:
+            return false;
+    }
+}
+
+// Copies <src> over <dst> when they match, in their recorded states (left as they were).
+bool RtCopy(command_list* cl, resource src, resource dst) {
+    device* dev = cl->get_device();
+    if (!src.handle || !dst.handle || src == dst) return false;
+    const resource_desc sd = dev->get_resource_desc(src), dd = dev->get_resource_desc(dst);
+    if (sd.texture.width != dd.texture.width || sd.texture.height != dd.texture.height ||
+        sd.texture.format != dd.texture.format) {
+        static int logged = 0;
+        if (logged++ < 4)
+            Log("Ray Reconstruction: signal %ux%u format %u doesn't match the game's %ux%u format %u", sd.texture.width,
+                sd.texture.height, static_cast<unsigned>(sd.texture.format), dd.texture.width, dd.texture.height,
+                static_cast<unsigned>(dd.texture.format));
+        return false;
+    }
+    auto si = g_rt.states.find(src.handle), di = g_rt.states.find(dst.handle);
+    const resource_usage ss = si != g_rt.states.end() ? si->second : resource_usage::undefined;
+    // rayTracingUpscale is about to read dst: an SRV state, non-pixel if nothing better is known.
+    resource_usage ds = di != g_rt.states.end() ? di->second : resource_usage::undefined;
+    if (ds == resource_usage::undefined) ds = resource_usage::shader_resource_non_pixel;
+    if (ss == resource_usage::undefined) return false;  // not seen in a barrier yet: next frame
+    cl->barrier(src, ss, resource_usage::copy_source);
+    cl->barrier(dst, ds, resource_usage::copy_dest);
+    cl->copy_resource(src, dst);
+    cl->barrier(src, resource_usage::copy_source, ss);
+    cl->barrier(dst, resource_usage::copy_dest, ds);
+    return true;
+}
+
+// Every compute dispatch: notes the signals and the G-buffer, skips the game's denoise passes, and
+// copies the signals in before rayTracingUpscale. True: the dispatch is skipped.
+bool RtOnDispatch(command_list* cl, ListState& s, uint32_t id) {
+    if (!g_set.rr || !g_set.enabled) return false;
+    device* dev = cl->get_device();
+    uint64_t frame;
+    {
+        std::lock_guard<std::mutex> lock(g_resMutex);
+        frame = g_frame;
+    }
+    std::lock_guard<std::mutex> lock(g_rtMutex);
+    const bool raw = g_set.rrDenoise == 2;
+    auto note = [&](int slot, resource r) {
+        if (g_rt.signalFrame != frame) {
+            for (resource& x : g_rt.signal) x = {0};
+            g_rt.signalFrame = frame;
+        }
+        g_rt.signal[slot] = r;
+        RtWatch(r);
+    };
+    switch (id) {
+        case kRtShadeDiffuse: if (raw) note(0, ComputeView(dev, s.compute, 0, true)), note(1, ComputeView(dev, s.compute, 1, true)); break;
+        case kRtShadeSpecular: if (raw) note(2, ComputeView(dev, s.compute, 0, true)); break;
+        case kRtShadeVfx: if (raw) note(3, ComputeView(dev, s.compute, 0, true)); break;
+        case kRtSpatialDiffuse: if (!raw) note(0, ComputeView(dev, s.compute, 0, true)), note(1, ComputeView(dev, s.compute, 1, true)); break;
+        case kRtSpatialSpecular: if (!raw) note(2, ComputeView(dev, s.compute, 0, true)); break;
+        case kRtSpatialVfx: if (!raw) note(3, ComputeView(dev, s.compute, 0, true)); break;
+        default: break;
+    }
+    const bool skipping = RtSkipping(frame);
+    if (id == kRtUpscale) {
+        g_rt.upscaleFrame = frame;
+        g_rt.base = ComputeView(dev, s.compute, kUpBase, false);
+        g_rt.normal = ComputeView(dev, s.compute, kUpNormal, false);
+        if (skipping && g_rt.signalFrame == frame) {
+            int copied = 0;
+            for (uint32_t i = 0; i < kRtSignals; ++i) {
+                const resource dst = ComputeView(dev, s.compute, kUpSignal + i, false);
+                RtWatch(dst);
+                copied += RtCopy(cl, g_rt.signal[i], dst);
+            }
+            if (copied && !g_rt.copied++)
+                Log("Ray Reconstruction: %d of %u ray tracing signals handed over un-denoised", copied, kRtSignals);
+        }
+        return false;
+    }
+    if (skipping && RtIsSkipped(id)) {
+        if (!g_rt.skipped++) Log("Ray Reconstruction: skipping the game's ray tracing denoise passes (%s)", kRrDenoiseNames[g_set.rrDenoise]);
+        return true;
+    }
+    return false;
+}
+
+bool RtCreatePipelines(device* dev) {
+    if (g_rt.pipe.handle) return true;
+    if (g_rt.pipesFailed) return false;
+    constant_range c = {};
+    c.count = 24;
+    c.visibility = shader_stage::all_compute;
+    descriptor_range srv = {};
+    srv.count = 3;
+    srv.visibility = shader_stage::all_compute;
+    srv.type = descriptor_type::shader_resource_view;
+    descriptor_range uav = srv;
+    uav.type = descriptor_type::unordered_access_view;
+    const pipeline_layout_param params[3] = {pipeline_layout_param(c), pipeline_layout_param(srv), pipeline_layout_param(uav)};
+    shader_desc cs = {};
+    cs.code = kGuideCs;
+    cs.code_size = sizeof(kGuideCs);
+    pipeline_subobject sub = {pipeline_subobject_type::compute_shader, 1, &cs};
+    constant_range vc = c;
+    vc.count = 8;
+    descriptor_range vsrv = srv, vuav = uav;
+    vsrv.count = 1, vuav.count = 1;
+    const pipeline_layout_param vparams[3] = {pipeline_layout_param(vc), pipeline_layout_param(vsrv), pipeline_layout_param(vuav)};
+    shader_desc vcs = {};
+    vcs.code = kGuideViewCs;
+    vcs.code_size = sizeof(kGuideViewCs);
+    pipeline_subobject vsub = {pipeline_subobject_type::compute_shader, 1, &vcs};
+    if (!dev->create_pipeline_layout(3, params, &g_rt.layout) || !dev->create_pipeline(g_rt.layout, 1, &sub, &g_rt.pipe) ||
+        !dev->create_pipeline_layout(3, vparams, &g_rt.viewLayout) ||
+        !dev->create_pipeline(g_rt.viewLayout, 1, &vsub, &g_rt.viewPipe)) {
+        g_rt.pipesFailed = true;
+        Log("couldn't create the Ray Reconstruction guide shader");
+        return false;
+    }
+    Log("Ray Reconstruction guide shader created");
+    return true;
+}
+
+// The caller holds g_resMutex (g_old) and g_rtMutex.
+bool RtGuideTextures(device* dev, uint32_t w, uint32_t h) {
+    if (g_rt.guide[0].handle && g_rt.guideW == w && g_rt.guideH == h) return true;
+    const format fmts[3] = {format::r8g8b8a8_unorm, format::r8g8b8a8_unorm, format::r16g16b16a16_float};
+    for (int i = 0; i < 3; ++i)
+        if (g_rt.guide[i].handle) g_old.push_back({g_rt.guide[i], {0}, g_rt.guideUav[i], g_frame});  // the GPU may still use them
+    for (int i = 0; i < 3; ++i) {
+        g_rt.guide[i] = {0}, g_rt.guideUav[i] = {0};
+        const resource_desc d(w, h, 1, 1, fmts[i], 1, memory_heap::default_,
+                              resource_usage::shader_resource | resource_usage::unordered_access);
+        if (!dev->create_resource(d, nullptr, resource_usage::shader_resource_non_pixel, &g_rt.guide[i]) ||
+            !dev->create_resource_view(g_rt.guide[i], resource_usage::unordered_access, resource_view_desc(fmts[i]),
+                                       &g_rt.guideUav[i])) {
+            Log("couldn't create the Ray Reconstruction guide textures %ux%u", w, h);
+            return false;
+        }
+    }
+    g_rt.guideW = w, g_rt.guideH = h;
+    Log("Ray Reconstruction guide textures %ux%u", w, h);
+    return true;
+}
+
+// The G-buffer's shader resource format: sRGB base colour decodes to linear.
+// A depth view format for <f>: RE2/RE3 have 32-bit depth with stencil, RE7 plain 32-bit depth (a
+// view in the wrong one lost the device).
+format RtDepthSrvFormat(format f) {
+    switch (f) {
+        case format::r32_g8_typeless: case format::d32_float_s8_uint: case format::r32_float_x8_uint:
+            return format::r32_float_x8_uint;
+        case format::r32_typeless: case format::d32_float: case format::r32_float:
+            return format::r32_float;
+        case format::r24_g8_typeless: case format::d24_unorm_s8_uint: case format::r24_unorm_x8_uint:
+            return format::r24_unorm_x8_uint;
+        case format::r16_typeless: case format::d16_unorm: case format::r16_unorm:
+            return format::r16_unorm;
+        default:
+            return format::unknown;
+    }
+}
+
+format RtSrvFormat(format f) {
+    if (f == format::r8g8b8a8_typeless) return format::r8g8b8a8_unorm_srgb;
+    if (f == format::b8g8r8a8_typeless) return format::b8g8r8a8_unorm_srgb;
+    return format_to_default_typed(f, 0);
+}
+
+// 4x4 inverse (row-major); false if singular.
+bool Inverse4(const float* m, float* out) {
+    float a[4][8];
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 8; ++c) a[r][c] = c < 4 ? m[r * 4 + c] : (c - 4 == r ? 1.0f : 0.0f);
+    for (int c = 0; c < 4; ++c) {
+        int p = c;
+        for (int r = c + 1; r < 4; ++r)
+            if (std::fabs(a[r][c]) > std::fabs(a[p][c])) p = r;
+        if (std::fabs(a[p][c]) < 1e-12f) return false;
+        if (p != c)
+            for (int k = 0; k < 8; ++k) std::swap(a[p][k], a[c][k]);
+        const float inv = 1 / a[c][c];
+        for (int k = 0; k < 8; ++k) a[c][k] *= inv;
+        for (int r = 0; r < 4; ++r) {
+            if (r == c) continue;
+            const float f = a[r][c];
+            for (int k = 0; k < 8; ++k) a[r][k] -= f * a[c][k];
+        }
+    }
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c) out[r * 4 + c] = a[r][c + 4];
+    return true;
+}
+
+// Ray Reconstruction's camera: world-to-view from SceneInfo.transposeViewMat (byte 64, the view
+// matrix's columns as rows) and view-to-clip = inverse(world-to-view) * viewProjMat.
+// A projection: no x/y crosstalk (row-vector form: [0][1], [0][2], [1][0], [1][2] are 0).
+bool LooksLikeProjection(const float* p) {
+    const float s = std::fmax(std::fabs(p[0]), std::fabs(p[5]));
+    return s > 0.05f && std::fabs(p[1]) < s * 1e-3f && std::fabs(p[2]) < s * 1e-3f && std::fabs(p[4]) < s * 1e-3f &&
+           std::fabs(p[6]) < s * 1e-3f;
+}
+
+bool RtMatrices(const float* scene, float* worldToView, float* viewToClip) {
+    const float* t = scene + 16;  // 3 rows of 4
+    const float* vp = scene + kViewProj;
+    // The view matrix's columns as rows (as the name says); if that doesn't give a projection, rows.
+    static int layout = 0;  // 0 transposed, 1 as is (found on the first frame that fits)
+    for (int attempt = 0; attempt < 2; ++attempt) {
+        const int l = attempt == 0 ? layout : 1 - layout;
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c) {
+                float v = r == 3 && c == 3 ? 1.0f : 0.0f;
+                if (c < 3 && r < 4) v = l == 0 ? t[c * 4 + r] : (r < 3 ? t[r * 4 + c] : t[c * 4 + 3]);
+                worldToView[r * 4 + c] = v;
+            }
+        float inv[16];
+        if (!Inverse4(worldToView, inv)) continue;
+        for (int r = 0; r < 4; ++r)
+            for (int c = 0; c < 4; ++c) {
+                float sum = 0;
+                for (int k = 0; k < 4; ++k) sum += inv[r * 4 + k] * vp[k * 4 + c];
+                viewToClip[r * 4 + c] = sum;
+            }
+        if (LooksLikeProjection(viewToClip)) {
+            if (l != layout) Log("Ray Reconstruction camera: SceneInfo.transposeViewMat read %s", l ? "as rows" : "as columns");
+            layout = l;
+            break;
+        }
+        if (attempt == 1) {
+            static int logged = 0;
+            if (logged++ < 4) Log("Ray Reconstruction camera: neither reading of transposeViewMat gives a projection");
+            return false;
+        }
+    }
+    // The rotation must be orthonormal.
+    bool ok = true;
+    for (int i = 0; i < 3 && ok; ++i)
+        for (int j = 0; j < 3; ++j) {
+            float d = 0;
+            for (int k = 0; k < 3; ++k) d += worldToView[i * 4 + k] * worldToView[j * 4 + k];
+            if (std::fabs(d - (i == j ? 1.0f : 0.0f)) > 5e-3f) ok = false;
+        }
+    if (!g_rt.loggedMatrices || !ok) {
+        static int logged = 0;
+        if (logged++ < 4) {
+            const float* w = worldToView;
+            const float* p = viewToClip;
+            Log("Ray Reconstruction camera %s: world-to-view rows (%.3f %.3f %.3f %.3f) (%.3f %.3f %.3f %.3f) (%.3f %.3f "
+                "%.3f %.3f) (%.3f %.3f %.3f %.3f); view-to-clip rows (%.4f %.4f %.4f %.4f) (%.4f %.4f %.4f %.4f) (%.4f "
+                "%.4f %.4f %.4f) (%.4f %.4f %.4f %.4f)",
+                ok ? "ok" : "NOT orthonormal", w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7], w[8], w[9], w[10], w[11],
+                w[12], w[13], w[14], w[15], p[0], p[1], p[2], p[3], p[4], p[5], p[6], p[7], p[8], p[9], p[10], p[11],
+                p[12], p[13], p[14], p[15]);
+        }
+        g_rt.loggedMatrices = true;
+    }
+    return ok;
+}
+
+// Records guide.hlsl on the TAA's list (the caller puts the game's state back after DLSS). The
+// G-buffer is in a shader resource state at the TAA (the lighting passes read it).
+bool RtBuildGuides(command_list* cl, resource depth, const float* scene, uint32_t w, uint32_t h) {
+    device* dev = cl->get_device();
+    if (!g_rt.base.handle || !g_rt.normal.handle) return g_rt.error = "G-buffer not seen", false;
+    const resource_desc bd = dev->get_resource_desc(g_rt.base), nd = dev->get_resource_desc(g_rt.normal);
+    if (bd.texture.width < w || bd.texture.height < h || nd.texture.width < w || nd.texture.height < h)
+        return g_rt.error = "G-buffer smaller than the render size", false;
+    const format depthFormat = RtDepthSrvFormat(dev->get_resource_desc(depth).texture.format);
+    if (depthFormat == format::unknown) {
+        static bool logged = false;
+        if (!logged) {
+            logged = true;
+            Log("Ray Reconstruction: depth format %u not handled",
+                static_cast<unsigned>(dev->get_resource_desc(depth).texture.format));
+        }
+        return g_rt.error = "depth format not handled (see the log)", false;
+    }
+    if (!RtCreatePipelines(dev) || !RtGuideTextures(dev, w, h)) return g_rt.error = "guide shader or textures failed", false;
+    const resource_view srvs[3] = {RtView(dev, depth, depthFormat, false),
+                                   RtView(dev, g_rt.base, RtSrvFormat(bd.texture.format), false),
+                                   RtView(dev, g_rt.normal, RtSrvFormat(nd.texture.format), false)};
+    for (const resource_view& v : srvs)
+        if (!v.handle) return g_rt.error = "couldn't read the G-buffer (views)", false;
+    static bool loggedFormats = false;
+    if (!loggedFormats) {
+        loggedFormats = true;
+        Log("Ray Reconstruction G-buffer: base colour %ux%u format %u, normal %ux%u format %u, depth view format %u",
+            bd.texture.width, bd.texture.height, static_cast<unsigned>(bd.texture.format), nd.texture.width,
+            nd.texture.height, static_cast<unsigned>(nd.texture.format), static_cast<unsigned>(depthFormat));
+    }
+    float params[24] = {};
+    memcpy(params, scene + 56, 16 * sizeof(float));  // viewProjInvMat, byte 224
+    const float* tvi = scene + 28;                     // transposeViewInvMat, byte 112: .w of each row = camera
+    params[16] = tvi[3], params[17] = tvi[7], params[18] = tvi[11];
+    params[20] = static_cast<float>(w), params[21] = static_cast<float>(h), params[22] = 1.0f / w, params[23] = 1.0f / h;
+    const resource_usage from[3] = {resource_usage::shader_resource_non_pixel, resource_usage::shader_resource_non_pixel,
+                                    resource_usage::shader_resource_non_pixel};
+    const resource_usage to[3] = {resource_usage::unordered_access, resource_usage::unordered_access,
+                                  resource_usage::unordered_access};
+    cl->barrier(3, g_rt.guide, from, to);
+    cl->bind_pipeline(pipeline_stage::all_compute, g_rt.pipe);
+    cl->push_constants(shader_stage::all_compute, g_rt.layout, 0, 0, 24, params);
+    descriptor_table_update u = {};
+    u.count = 3;
+    u.type = descriptor_type::shader_resource_view;
+    u.descriptors = srvs;
+    cl->push_descriptors(shader_stage::all_compute, g_rt.layout, 1, u);
+    u.type = descriptor_type::unordered_access_view;
+    u.descriptors = g_rt.guideUav;
+    cl->push_descriptors(shader_stage::all_compute, g_rt.layout, 2, u);
+    cl->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    cl->barrier(3, g_rt.guide, to, from);
+    return true;
+}
+
+// Debug view: guide <which> (1 diffuse, 2 specular, 3 normals, 4 roughness) over <output> (UAV state).
+void RtShowGuide(command_list* cl, resource output, int which, uint32_t renderW, uint32_t renderH) {
+    device* dev = cl->get_device();
+    if (!g_rt.viewPipe.handle || which < 1 || which > 4) return;
+    const resource g = g_rt.guide[which == 1 ? 0 : which == 2 ? 1 : 2];
+    const resource_desc od = dev->get_resource_desc(output);
+    const resource_view srv = RtView(dev, g, which <= 2 ? format::r8g8b8a8_unorm : format::r16g16b16a16_float, false);
+    const resource_view uav = RtView(dev, output, od.texture.format, true);
+    if (!srv.handle || !uav.handle) return;
+    float params[8] = {static_cast<float>(od.texture.width), static_cast<float>(od.texture.height),
+                       static_cast<float>(renderW) / od.texture.width, static_cast<float>(renderH) / od.texture.height};
+    const uint32_t mode = which <= 2 ? 1 : which == 3 ? 2 : 3;
+    memcpy(&params[4], &mode, 4);
+    cl->bind_pipeline(pipeline_stage::all_compute, g_rt.viewPipe);
+    cl->push_constants(shader_stage::all_compute, g_rt.viewLayout, 0, 0, 8, params);
+    descriptor_table_update u = {};
+    u.count = 1;
+    u.type = descriptor_type::shader_resource_view;
+    u.descriptors = &srv;
+    cl->push_descriptors(shader_stage::all_compute, g_rt.viewLayout, 1, u);
+    u.type = descriptor_type::unordered_access_view;
+    u.descriptors = &uav;
+    cl->push_descriptors(shader_stage::all_compute, g_rt.viewLayout, 2, u);
+    cl->dispatch((od.texture.width + 7) / 8, (od.texture.height + 7) / 8, 1);
+    cl->barrier(output, resource_usage::unordered_access, resource_usage::unordered_access);
+}
+
+void RtDestroy(device* dev) {
+    std::lock_guard<std::mutex> lock(g_rtMutex);
+    for (auto& [k, v] : g_rt.views) dev->destroy_resource_view(v);
+    for (int i = 0; i < 3; ++i) {
+        if (g_rt.guideUav[i].handle) dev->destroy_resource_view(g_rt.guideUav[i]);
+        if (g_rt.guide[i].handle) dev->destroy_resource(g_rt.guide[i]);
+    }
+    if (g_rt.pipe.handle) dev->destroy_pipeline(g_rt.pipe);
+    if (g_rt.viewPipe.handle) dev->destroy_pipeline(g_rt.viewPipe);
+    if (g_rt.layout.handle) dev->destroy_pipeline_layout(g_rt.layout);
+    if (g_rt.viewLayout.handle) dev->destroy_pipeline_layout(g_rt.viewLayout);
+    g_rt = RtState();
+}
+
 // The render size: the colour texture's, or SceneInfo's screen size when the viewport is smaller.
 void RenderSize(device* dev, resource color, const float* scene, uint32_t* w, uint32_t* h) {
     const resource_desc cd = dev->get_resource_desc(color);
@@ -694,6 +1214,7 @@ void OnBarrier(command_list* cl, uint32_t count, const resource* res, const reso
     RunPending(cl, *s, true);
     for (uint32_t i = 0; i < count; ++i)
         if (res[i] == s->hudTex) s->hudState = after[i];
+    RtOnBarrier(count, res, after);
 }
 
 // ---------------------------------------------------------------- passes
@@ -752,6 +1273,7 @@ bool OnTaa(command_list* cl, ListState& s) {
     auto* list = reinterpret_cast<ID3D12GraphicsCommandList*>(cl->get_native());
     Transition(cl, g_x, resource_usage::unordered_access);
     bool ok;
+    bool usedRr = false;
     if (tech == Tech::Dlss) {
         dlss::Inputs in;
         in.color = reinterpret_cast<ID3D12Resource*>(color.handle);
@@ -765,7 +1287,39 @@ bool OnTaa(command_list* cl, ListState& s) {
         in.motionScaleY = -0.5f * renderH;
         in.reset = reset;
         in.preset = g_set.preset;
+        // Ray Reconstruction while the game ray traces (rayTracingUpscale ran in the last second or
+        // so: Village skips it on some frames, and switching DLSS features every few frames would
+        // restart their history each time).
+        std::lock_guard<std::mutex> rtLock(g_rtMutex);
+        static float worldToView[16], viewToClip[16];
+        constexpr uint64_t kRtGraceFrames = 60;
+        if (g_set.rr) {
+            std::string why;
+            if (!dlss::RrAvailable(&why)) g_rt.error = why;
+            else if (g_rt.upscaleFrame == UINT64_MAX || g_rt.upscaleFrame + kRtGraceFrames < g_frame)
+                g_rt.error = "the game isn't ray tracing (turn on ray-traced reflections)";
+            else if (!RtMatrices(scene, worldToView, viewToClip)) g_rt.error = "camera matrices not as expected (see the log)";
+            else if (RtBuildGuides(cl, depth, scene, renderW, renderH)) {
+                in.rr = true;
+                in.rrPreset = g_set.rrPreset;
+                in.diffuseAlbedo = reinterpret_cast<ID3D12Resource*>(g_rt.guide[0].handle);
+                in.specularAlbedo = reinterpret_cast<ID3D12Resource*>(g_rt.guide[1].handle);
+                in.normalRoughness = reinterpret_cast<ID3D12Resource*>(g_rt.guide[2].handle);
+                in.worldToView = worldToView;
+                in.viewToClip = viewToClip;
+            }
+        }
         ok = dlss::Evaluate(list, in, err);
+        if (ok && in.rr) {
+            usedRr = true;
+            g_rt.error.clear();
+            g_rt.rrFrame = g_frame;
+            if (!g_rt.rrFrames++) Log("DLSS Ray Reconstruction: first frame (%ux%u -> %ux%u)", renderW, renderH, outW, outH);
+            if (g_set.guideView > 0) {
+                cl->bind_descriptor_tables(shader_stage::all_compute, s.compute.layout, 0, 0, nullptr);  // ReShade's heaps back
+                RtShowGuide(cl, g_x.res, g_set.guideView, renderW, renderH);
+            }
+        }
     } else {
         fsr::Inputs in;
         in.color = reinterpret_cast<ID3D12Resource*>(color.handle);
@@ -792,7 +1346,7 @@ bool OnTaa(command_list* cl, ListState& s) {
         return false;
     }
 
-    std::string mode = std::string(tech == Tech::Dlss ? "DLSS " : "FSR ") +
+    std::string mode = std::string(usedRr ? "DLSS Ray Reconstruction " : tech == Tech::Dlss ? "DLSS " : "FSR ") +
                        (upscale ? std::to_string(renderW) + "x" + std::to_string(renderH) + " -> " + std::to_string(outW) +
                                       "x" + std::to_string(outH)
                                 : (tech == Tech::Dlss ? "DLAA " : "native AA ") + std::to_string(renderW) + "x" +
@@ -1083,6 +1637,7 @@ bool OnFinalCompute(command_list* cl, ListState& s) {
 }
 
 void DestroyAll(device* dev) {
+    RtDestroy(dev);
     for (auto& [res, rtv] : g_targetRtvs)
         if (rtv.handle) dev->destroy_resource_view(rtv);
     g_targetRtvs.clear();
@@ -1204,7 +1759,9 @@ bool UpscalerOnDispatch(command_list* cl) {
     ListState* s = State(cl);
     if (!s) return false;
     RunPending(cl, *s, false);
-    if (PipelinePs(s->pipe) != kFinalCs) return false;
+    const uint32_t id = PipelinePs(s->pipe);
+    if (RtOnDispatch(cl, *s, id)) return true;  // a skipped ray tracing denoise pass
+    if (id != kFinalCs) return false;
     if (g_set.enabled && OnFinalCompute(cl, *s)) return true;
     // The game's CAS runs: the HUD texture (u0) holds the scene after it.
     s->snapTex = ComputeUav(cl->get_device(), s->compute, 0), s->snapState = resource_usage::unordered_access;
@@ -1411,6 +1968,37 @@ void UpscalerOverlay() {
                  "second-generation transformer) cost more, especially on RTX 20 and 30 cards. NVIDIA's "
                  "default leaves it to the driver. A DLSS override set in the NVIDIA App takes "
                  "precedence.\n\nOnly used when DLSS upscales (greyed out while FSR does).");
+            ImGui::BeginDisabled(ResolvedTech() == Tech::Fsr);
+            if (ImGui::Checkbox("Ray Reconstruction (experimental)", &g_set.rr)) {
+                changed = true;
+                Log("Ray Reconstruction setting: %s", g_set.rr ? "on" : "off");
+            }
+            Help("NVIDIA's DLSS Ray Reconstruction in place of DLSS Super Resolution while the game ray traces:\n"
+                 "it upscales and cleans up what's left of the noise in the ray-traced reflections and lighting,\n"
+                 "on top of the game's own ray tracing denoiser. Needs the game's ray tracing on (Super Resolution\n"
+                 "otherwise). Experimental. The Advanced tab can skip parts of the game's denoiser for testing; the\n"
+                 "game traces at half resolution, which Ray Reconstruction isn't made for, so that looked worse.");
+            if (g_set.rr) {
+                static const char* const kRrNames[] = {"NVIDIA's default", "D (transformer)", "E (latest transformer)",
+                                                       "F (RR 2)"};
+                static const int kRrIds[] = {0, 4, 5, 6};
+                int cur = g_set.rrPreset == 4 ? 1 : g_set.rrPreset == 5 ? 2 : g_set.rrPreset == 6 ? 3 : 0;
+                ImGui::SetNextItemWidth(ControlWidth());
+                if (ImGui::Combo("Ray Reconstruction model", &cur, kRrNames, 4)) {
+                    g_set.rrPreset = kRrIds[cur];
+                    changed = true;
+                    Log("Ray Reconstruction model setting: %d", g_set.rrPreset);
+                }
+                Help("D, E or F, or NVIDIA's default. A Ray Reconstruction override set in the NVIDIA App takes\n"
+                     "precedence (set it to \"Use app default\" there for this choice to apply).");
+                std::string rrErr;
+                {
+                    std::lock_guard<std::mutex> lock(g_rtMutex);
+                    rrErr = g_rt.error;
+                }
+                if (!rrErr.empty() && g_set.enabled) ImGui::TextColored(kWarn, "Ray Reconstruction: %s", rrErr.c_str());
+            }
+            ImGui::EndDisabled();
         }
         ImGui::EndDisabled();
         DrawFrameGenSettings();
@@ -1427,6 +2015,13 @@ void UpscalerOverlay() {
             err = g_lastError;
         }
         if (g_set.enabled && !err.empty()) ImGui::TextColored(kWarn, "Last problem: %s", err.c_str());
+        if (g_set.rr) {
+            std::lock_guard<std::mutex> lock(g_rtMutex);
+            ImGui::TextDisabled("Ray Reconstruction frames %llu; game's ray tracing denoise passes skipped %llu, "
+                                "signals handed over %llu times",
+                                static_cast<unsigned long long>(g_rt.rrFrames), static_cast<unsigned long long>(g_rt.skipped),
+                                static_cast<unsigned long long>(g_rt.copied));
+        }
         DrawFrameGenStatus();
         ImGui::EndTabItem();
     }
@@ -1447,6 +2042,24 @@ void UpscalerOverlay() {
         ImGui::SameLine();
         changed |= ImGui::Checkbox("Flip jitter Y", &g_set.flipJitterY);
         Help("Testing only: the sign of the camera jitter given to DLSS and FSR. Leave both off.");
+        ImGui::SeparatorText("Ray Reconstruction");
+        ImGui::SetNextItemWidth(ControlWidth() * 1.4f);
+        if (ImGui::Combo("Game's ray tracing denoiser", &g_set.rrDenoise, kRrDenoiseNames, 3)) {
+            changed = true;
+            Log("Ray Reconstruction denoising setting: %s", kRrDenoiseNames[g_set.rrDenoise]);
+        }
+        Help("While Ray Reconstruction runs, which of the game's own ray tracing denoise passes still run.\n"
+             "Game's denoiser (recommended, looked best in testing): everything stays; Ray Reconstruction\n"
+             "upscales and cleans up the result. Skip all but the spatial passes: the game's frame-to-frame\n"
+             "(temporal) filtering, variance and deflicker are skipped; its spatial passes still fill in the\n"
+             "sparse rays (global illumination is traced with a quarter of the rays). Skip all: Ray\n"
+             "Reconstruction gets the raw rays. The game traces at half resolution, so the skipping choices\n"
+             "come out blotchier.");
+        ImGui::SetNextItemWidth(ControlWidth());
+        if (ImGui::Combo("Show guide", &g_set.guideView, kGuideViewNames, kGuideViewCount))
+            Log("diagnosis: show guide %s", kGuideViewNames[g_set.guideView]);
+        Help("Shows one of the surface pictures Ray Reconstruction gets from the game in place of the image:\n"
+             "surface colour, reflectivity, normals or roughness. For checking; off at each launch.");
         DrawFrameGenAdvanced();
         ImGui::SeparatorText("Development");
         DrawCaptureTool();
@@ -1471,6 +2084,7 @@ void UpscalerInit() {
     reshade::register_event<reshade::addon_event::destroy_device>(&OnDestroyDevice);
     reshade::register_event<reshade::addon_event::create_sampler>(&OnCreateSampler);
     reshade::register_event<reshade::addon_event::barrier>(&OnBarrier);
+    reshade::register_event<reshade::addon_event::destroy_resource>(&RtOnDestroyResource);
     RegisterFrameGen();
     const float scale = g_set.enabled && g_set.mode > 0 ? kModes[g_set.mode].scale : StartupRenderScale();
     if (g_set.enabled && g_set.upscale && g_set.textureDetail && scale < 0.99f) g_mipBias = std::log2(scale);
@@ -1493,6 +2107,7 @@ void UpscalerShutdown() {
     reshade::unregister_event<reshade::addon_event::destroy_device>(&OnDestroyDevice);
     reshade::unregister_event<reshade::addon_event::create_sampler>(&OnCreateSampler);
     reshade::unregister_event<reshade::addon_event::barrier>(&OnBarrier);
+    reshade::unregister_event<reshade::addon_event::destroy_resource>(&RtOnDestroyResource);
     UnregisterFrameGen();
 }
 

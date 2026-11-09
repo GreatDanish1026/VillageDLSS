@@ -22,7 +22,21 @@ struct Inputs {
     float motionScaleX = 1, motionScaleY = 1;
     bool reset = false;
     int preset = 0;  // NVSDK_NGX_DLSS_Hint_Render_Preset_*
+    // Ray Reconstruction (DLSS-D) in place of Super Resolution when rr is set: the colour then holds
+    // un-denoised ray-traced lighting, and these guides are needed (render resolution, state
+    // non-pixel shader resource):
+    bool rr = false;
+    int rrPreset = 0;  // NVSDK_NGX_RayReconstruction_Hint_Render_Preset_* (0 = NVIDIA's default)
+    ID3D12Resource* diffuseAlbedo = nullptr;
+    ID3D12Resource* specularAlbedo = nullptr;
+    ID3D12Resource* normalRoughness = nullptr;  // world-space normal xyz, roughness w
+    const float* worldToView = nullptr;  // 4x4 row-major, row vectors
+    const float* viewToClip = nullptr;
 };
+
+// Whether Ray Reconstruction can run (after Init): nvngx_dlssd.dll found and supported. If not,
+// a reason.
+bool RrAvailable(std::string* why = nullptr);
 
 // Loads NGX for the device (once). False with a reason if DLSS can't run.
 bool Init(ID3D12Device* device, std::string& error);

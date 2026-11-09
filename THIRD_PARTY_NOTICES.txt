@@ -61,10 +61,11 @@ This software contains source code provided by NVIDIA Corporation.
 
 
 
-The VillageDLSS release zip redistributes NVIDIA's signed DLSS runtime,
-nvngx_dlss.dll 310.9.16 (from bin\x64 of NVIDIA's Streamline SDK 2.14.16
+The VillageDLSS release zip redistributes NVIDIA's signed DLSS runtimes,
+nvngx_dlss.dll and nvngx_dlssd.dll (Ray Reconstruction) 310.9.16 (from bin\x64 of
+NVIDIA's Streamline SDK 2.14.16
 release), unmodified, under the NVIDIA RTX SDKs license (NVIDIA-DLSS-LICENSE.txt
-in the zip's VillageDLSS-licenses folder). It is not part of the source
+in the zip's VillageDLSS-licenses folder). They are not part of the source
 repository.
 
 

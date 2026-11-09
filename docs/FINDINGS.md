@@ -164,3 +164,29 @@ mip bias for the lower render size.
 | jitter | SceneInfo projElement[0].zw x (width/2, height/2) px; sign to settle in testing |
 | output | TAA render target (rgba16f); the history copy after it can stay |
 | reset | camera cuts: not found yet (big jumps in prevViewProjMat vs viewProjMat could do) |
+
+## 1.2.0: DLSS Ray Reconstruction (2026-11-09)
+
+Ported from RE7DLSS 1.2.0 (RE2DLSS `docs/FINDINGS.md` "Ray tracing chain" explains the passes).
+Village runs the same chain as RE3/RE7 (three signals into rayTracingUpscale, no VFX signal), with
+its own shader builds and extra passes (rayTracingDownsamplingBuffer, CalcMotionNormalDepth,
+CalcHistory, RayDirection, Binning, GenerateWorkQueue, DispatchIndirectArg). Names and registers
+from the dumps in `docs/shaders/rt`:
+
+| Pass | Village | RE3 |
+|---|---|---|
+| rayTracingShading (diffuse: u0 shY, u1 cocg) | cs7afe99a0 | csfc23ed5b |
+| rayTracingShading (specular: u0) | cs244a4781 | csde6f8914 |
+| rayTracingSpatialAccumulation diffuse / specular | cs7f4c08ac / cs8e128757 | csd6792963 / cs25501ade |
+| rayTracingMeanVariance | cs01ea4198 | cs0af21e0f |
+| rayTracingTemporalAccumulation specular / diffuse | cs946de26d / cs9f40a58c | csa4fd0f93 / cs94984fd1 |
+| rayTracingDeflickerSpecular | csc374e480 | cs091f2a20 |
+| rayTracingBilateralFilter | cs9514a55e | cs905f94bf |
+| rayTracingUpscale (t2 base colour, t3 normal, t5-t7) | cs4206d838 | cs4e928452 |
+
+Village skips rayTracingUpscale on some frames: Ray Reconstruction is kept while it ran in the last
+60 frames, so DLSS doesn't switch features (and restart its history) every few frames. Depth is
+32-bit + stencil (view format r32_float_x8_uint, picked from the depth's format as in RE7DLSS).
+
+Test (2026-11-09, 4K HDR, RT on): RR at DLAA and Quality (2561x1440 -> 3840x2160), camera ok,
+models D/E/F, back to Super Resolution only across real ray tracing gaps at scene changes.

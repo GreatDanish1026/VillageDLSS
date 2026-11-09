@@ -1,0 +1,639 @@
+;
+; Note: shader requires additional functionality:
+;       Wave level operations
+;
+;
+; Input signature:
+;
+; Name                 Index   Mask Register SysValue  Format   Used
+; -------------------- ----- ------ -------- -------- ------- ------
+; no parameters
+;
+; Output signature:
+;
+; Name                 Index   Mask Register SysValue  Format   Used
+; -------------------- ----- ------ -------- -------- ------- ------
+; no parameters
+; shader debug name: 840d9e0d8ed16bd2ae6c7f217d0f873f.pdb
+; shader hash: 840d9e0d8ed16bd2ae6c7f217d0f873f
+;
+; Pipeline Runtime Information: 
+;
+;PSVRuntimeInfo:
+; Compute Shader
+; MinimumExpectedWaveLaneCount: 0
+; MaximumExpectedWaveLaneCount: 4294967295
+; UsesViewID: false
+; SigInputElements: 0
+; SigOutputElements: 0
+; SigPatchConstOrPrimElements: 0
+; SigInputVectors: 0
+; SigOutputVectors[0]: 0
+; SigOutputVectors[1]: 0
+; SigOutputVectors[2]: 0
+; SigOutputVectors[3]: 0
+;
+;
+; Buffer Definitions:
+;
+; cbuffer RayTracingDenoiserConstantBufferInfo
+; {
+;
+;   struct dx.alignment.legacy.RayTracingDenoiserConstantBufferInfo
+;   {
+;
+;       uint StepSize;                                ; Offset:    0
+;       float ResDiffuse;                             ; Offset:    4
+;       float ResSpecular;                            ; Offset:    8
+;       float normalCompareThreshold;                 ; Offset:   12
+;       float ResolutionWidth;                        ; Offset:   16
+;       float ResolutionHeight;                       ; Offset:   20
+;       float DiffuseScaler;                          ; Offset:   24
+;       float SpecularScaler;                         ; Offset:   28
+;       row_major float4x4 prevViewMat;               ; Offset:   32
+;       row_major float4x4 prevProjMat;               ; Offset:   96
+;       float3 prevZToLinear;                         ; Offset:  160
+;       float AODistance;                             ; Offset:  172
+;       float SurfelSize;                             ; Offset:  176
+;       float SurfelReprojectionThreshold;            ; Offset:  180
+;       float ResolutionRatio;                        ; Offset:  184
+;       float SpecularRoughnessThreshold;             ; Offset:  188
+;       float4 SudokuScrambleRNG;                     ; Offset:  192
+;   
+;   } RayTracingDenoiserConstantBufferInfo;           ; Offset:    0 Size:   208
+;
+; }
+;
+; Resource bind info for rayBinningDirectionSRV
+; {
+;
+;   uint $Element;                                    ; Offset:    0 Size:     4
+;
+; }
+;
+; Resource bind info for rayBinningIndexUAV
+; {
+;
+;   uint $Element;                                    ; Offset:    0 Size:     4
+;
+; }
+;
+;
+; Resource Bindings:
+;
+; Name                                 Type  Format         Dim      ID      HLSL Bind  Count
+; ------------------------------ ---------- ------- ----------- ------- -------------- ------
+; RayTracingDenoiserConstantBufferInfo   cbuffer      NA          NA     CB0            cb0     1
+; rayBinningDirectionSRV            texture  struct         r/o      T0             t0     1
+; rayBinningIndexUAV                    UAV  struct         r/w      U0             u0     1
+;
+target datalayout = "e-m:e-p:32:32-i1:32-i8:32-i16:32-i32:32-i64:64-f16:32-f32:32-f64:64-n8:16:32:64"
+target triple = "dxil-ms-dx"
+
+%dx.types.Handle = type { i8* }
+%dx.types.CBufRet.f32 = type { float, float, float, float }
+%dx.types.ResRet.i32 = type { i32, i32, i32, i32, i32 }
+%"class.StructuredBuffer<unsigned int>" = type { i32 }
+%"class.RWStructuredBuffer<unsigned int>" = type { i32 }
+%dx.alignment.legacy.RayTracingDenoiserConstantBufferInfo = type { i32, float, float, float, float, float, float, float, [4 x <4 x float>], [4 x <4 x float>], <3 x float>, float, float, float, float, float, <4 x float> }
+
+@"\01?s_bucket@@3PAHA" = external addrspace(3) global [1024 x i32], align 4
+
+define void @rayTracingBinning_main() {
+  %1 = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 1, i32 0, i32 0, i1 false)  ; CreateHandle(resourceClass,rangeId,index,nonUniformIndex)
+  %2 = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 0, i32 0, i32 0, i1 false)  ; CreateHandle(resourceClass,rangeId,index,nonUniformIndex)
+  %3 = call %dx.types.Handle @dx.op.createHandle(i32 57, i8 2, i32 0, i32 0, i1 false)  ; CreateHandle(resourceClass,rangeId,index,nonUniformIndex)
+  %4 = call i32 @dx.op.threadIdInGroup.i32(i32 95, i32 0)  ; ThreadIdInGroup(component)
+  %5 = call i32 @dx.op.groupId.i32(i32 94, i32 0)  ; GroupId(component)
+  %6 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %3, i32 1)  ; CBufferLoadLegacy(handle,regIndex)
+  %7 = extractvalue %dx.types.CBufRet.f32 %6, 0
+  %8 = call %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32 59, %dx.types.Handle %3, i32 0)  ; CBufferLoadLegacy(handle,regIndex)
+  %9 = extractvalue %dx.types.CBufRet.f32 %8, 1
+  %10 = fmul fast float %9, 8.000000e+00
+  %11 = fdiv fast float %7, %10
+  %12 = call float @dx.op.unary.f32(i32 28, float %11)  ; Round_pi(value)
+  %13 = extractvalue %dx.types.CBufRet.f32 %6, 1
+  %14 = fdiv fast float %13, %10
+  %15 = call float @dx.op.unary.f32(i32 28, float %14)  ; Round_pi(value)
+  %16 = fmul fast float %12, 6.400000e+01
+  %17 = fmul fast float %16, %15
+  %18 = fptoui float %17 to i32
+  %19 = icmp ult i32 %4, 1024
+  br i1 %19, label %20, label %22
+
+; <label>:20                                      ; preds = %0
+  %21 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %4
+  store i32 0, i32 addrspace(3)* %21, align 4, !tbaa !15
+  br label %22
+
+; <label>:22                                      ; preds = %20, %0
+  call void @dx.op.barrier(i32 80, i32 9)  ; Barrier(barrierMode)
+  %23 = shl i32 %5, 13
+  %24 = add i32 %23, 8192
+  %25 = call i32 @dx.op.binary.i32(i32 40, i32 %24, i32 %18)  ; UMin(a,b)
+  %26 = add i32 %23, %4
+  %27 = icmp ult i32 %26, %25
+  br i1 %27, label %28, label %56
+
+; <label>:28                                      ; preds = %22
+  %29 = call %dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32 139, %dx.types.Handle %2, i32 %26, i32 0, i8 1, i32 4)  ; RawBufferLoad(srv,index,elementOffset,mask,alignment)
+  %30 = extractvalue %dx.types.ResRet.i32 %29, 0
+  %31 = lshr i32 %30, 27
+  %32 = lshr i32 %30, 11
+  %33 = and i32 %32, 15
+  %34 = shl nuw nsw i32 %32, 4
+  %35 = and i32 %34, 256
+  %36 = or i32 %35, %33
+  %37 = shl nuw nsw i32 %33, 2
+  %38 = or i32 %36, %37
+  %39 = and i32 %38, 307
+  %40 = shl nuw nsw i32 %39, 1
+  %41 = or i32 %40, %39
+  %42 = shl nuw nsw i32 %31, 4
+  %43 = or i32 %42, %31
+  %44 = and i32 %43, 271
+  %45 = shl nuw nsw i32 %44, 2
+  %46 = or i32 %45, %44
+  %47 = and i32 %46, 307
+  %48 = shl nuw nsw i32 %47, 1
+  %49 = or i32 %48, %47
+  %50 = and i32 %49, 341
+  %51 = shl nuw nsw i32 %41, 1
+  %52 = and i32 %51, 682
+  %53 = or i32 %50, %52
+  %54 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %53
+  %55 = atomicrmw add i32 addrspace(3)* %54, i32 1 seq_cst
+  br label %56
+
+; <label>:56                                      ; preds = %28, %22
+  %57 = phi i32 [ undef, %22 ], [ %53, %28 ]
+  %58 = or i32 %23, 1024
+  %59 = add i32 %58, %4
+  %60 = icmp ult i32 %59, %25
+  br i1 %60, label %61, label %89
+
+; <label>:61                                      ; preds = %56
+  %62 = call %dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32 139, %dx.types.Handle %2, i32 %59, i32 0, i8 1, i32 4)  ; RawBufferLoad(srv,index,elementOffset,mask,alignment)
+  %63 = extractvalue %dx.types.ResRet.i32 %62, 0
+  %64 = lshr i32 %63, 27
+  %65 = lshr i32 %63, 11
+  %66 = and i32 %65, 15
+  %67 = shl nuw nsw i32 %65, 4
+  %68 = and i32 %67, 256
+  %69 = or i32 %68, %66
+  %70 = shl nuw nsw i32 %66, 2
+  %71 = or i32 %69, %70
+  %72 = and i32 %71, 307
+  %73 = shl nuw nsw i32 %72, 1
+  %74 = or i32 %73, %72
+  %75 = shl nuw nsw i32 %64, 4
+  %76 = or i32 %75, %64
+  %77 = and i32 %76, 271
+  %78 = shl nuw nsw i32 %77, 2
+  %79 = or i32 %78, %77
+  %80 = and i32 %79, 307
+  %81 = shl nuw nsw i32 %80, 1
+  %82 = or i32 %81, %80
+  %83 = and i32 %82, 341
+  %84 = shl nuw nsw i32 %74, 1
+  %85 = and i32 %84, 682
+  %86 = or i32 %83, %85
+  %87 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %86
+  %88 = atomicrmw add i32 addrspace(3)* %87, i32 1 seq_cst
+  br label %89
+
+; <label>:89                                      ; preds = %61, %56
+  %90 = phi i32 [ undef, %56 ], [ %86, %61 ]
+  %91 = or i32 %23, 2048
+  %92 = add i32 %91, %4
+  %93 = icmp ult i32 %92, %25
+  br i1 %93, label %94, label %122
+
+; <label>:94                                      ; preds = %89
+  %95 = call %dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32 139, %dx.types.Handle %2, i32 %92, i32 0, i8 1, i32 4)  ; RawBufferLoad(srv,index,elementOffset,mask,alignment)
+  %96 = extractvalue %dx.types.ResRet.i32 %95, 0
+  %97 = lshr i32 %96, 27
+  %98 = lshr i32 %96, 11
+  %99 = and i32 %98, 15
+  %100 = shl nuw nsw i32 %98, 4
+  %101 = and i32 %100, 256
+  %102 = or i32 %101, %99
+  %103 = shl nuw nsw i32 %99, 2
+  %104 = or i32 %102, %103
+  %105 = and i32 %104, 307
+  %106 = shl nuw nsw i32 %105, 1
+  %107 = or i32 %106, %105
+  %108 = shl nuw nsw i32 %97, 4
+  %109 = or i32 %108, %97
+  %110 = and i32 %109, 271
+  %111 = shl nuw nsw i32 %110, 2
+  %112 = or i32 %111, %110
+  %113 = and i32 %112, 307
+  %114 = shl nuw nsw i32 %113, 1
+  %115 = or i32 %114, %113
+  %116 = and i32 %115, 341
+  %117 = shl nuw nsw i32 %107, 1
+  %118 = and i32 %117, 682
+  %119 = or i32 %116, %118
+  %120 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %119
+  %121 = atomicrmw add i32 addrspace(3)* %120, i32 1 seq_cst
+  br label %122
+
+; <label>:122                                     ; preds = %94, %89
+  %123 = phi i32 [ undef, %89 ], [ %119, %94 ]
+  %124 = or i32 %23, 3072
+  %125 = add i32 %124, %4
+  %126 = icmp ult i32 %125, %25
+  br i1 %126, label %127, label %155
+
+; <label>:127                                     ; preds = %122
+  %128 = call %dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32 139, %dx.types.Handle %2, i32 %125, i32 0, i8 1, i32 4)  ; RawBufferLoad(srv,index,elementOffset,mask,alignment)
+  %129 = extractvalue %dx.types.ResRet.i32 %128, 0
+  %130 = lshr i32 %129, 27
+  %131 = lshr i32 %129, 11
+  %132 = and i32 %131, 15
+  %133 = shl nuw nsw i32 %131, 4
+  %134 = and i32 %133, 256
+  %135 = or i32 %134, %132
+  %136 = shl nuw nsw i32 %132, 2
+  %137 = or i32 %135, %136
+  %138 = and i32 %137, 307
+  %139 = shl nuw nsw i32 %138, 1
+  %140 = or i32 %139, %138
+  %141 = shl nuw nsw i32 %130, 4
+  %142 = or i32 %141, %130
+  %143 = and i32 %142, 271
+  %144 = shl nuw nsw i32 %143, 2
+  %145 = or i32 %144, %143
+  %146 = and i32 %145, 307
+  %147 = shl nuw nsw i32 %146, 1
+  %148 = or i32 %147, %146
+  %149 = and i32 %148, 341
+  %150 = shl nuw nsw i32 %140, 1
+  %151 = and i32 %150, 682
+  %152 = or i32 %149, %151
+  %153 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %152
+  %154 = atomicrmw add i32 addrspace(3)* %153, i32 1 seq_cst
+  br label %155
+
+; <label>:155                                     ; preds = %127, %122
+  %156 = phi i32 [ undef, %122 ], [ %152, %127 ]
+  %157 = or i32 %23, 4096
+  %158 = add i32 %157, %4
+  %159 = icmp ult i32 %158, %25
+  br i1 %159, label %160, label %188
+
+; <label>:160                                     ; preds = %155
+  %161 = call %dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32 139, %dx.types.Handle %2, i32 %158, i32 0, i8 1, i32 4)  ; RawBufferLoad(srv,index,elementOffset,mask,alignment)
+  %162 = extractvalue %dx.types.ResRet.i32 %161, 0
+  %163 = lshr i32 %162, 27
+  %164 = lshr i32 %162, 11
+  %165 = and i32 %164, 15
+  %166 = shl nuw nsw i32 %164, 4
+  %167 = and i32 %166, 256
+  %168 = or i32 %167, %165
+  %169 = shl nuw nsw i32 %165, 2
+  %170 = or i32 %168, %169
+  %171 = and i32 %170, 307
+  %172 = shl nuw nsw i32 %171, 1
+  %173 = or i32 %172, %171
+  %174 = shl nuw nsw i32 %163, 4
+  %175 = or i32 %174, %163
+  %176 = and i32 %175, 271
+  %177 = shl nuw nsw i32 %176, 2
+  %178 = or i32 %177, %176
+  %179 = and i32 %178, 307
+  %180 = shl nuw nsw i32 %179, 1
+  %181 = or i32 %180, %179
+  %182 = and i32 %181, 341
+  %183 = shl nuw nsw i32 %173, 1
+  %184 = and i32 %183, 682
+  %185 = or i32 %182, %184
+  %186 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %185
+  %187 = atomicrmw add i32 addrspace(3)* %186, i32 1 seq_cst
+  br label %188
+
+; <label>:188                                     ; preds = %160, %155
+  %189 = phi i32 [ undef, %155 ], [ %185, %160 ]
+  %190 = or i32 %23, 5120
+  %191 = add i32 %190, %4
+  %192 = icmp ult i32 %191, %25
+  br i1 %192, label %193, label %221
+
+; <label>:193                                     ; preds = %188
+  %194 = call %dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32 139, %dx.types.Handle %2, i32 %191, i32 0, i8 1, i32 4)  ; RawBufferLoad(srv,index,elementOffset,mask,alignment)
+  %195 = extractvalue %dx.types.ResRet.i32 %194, 0
+  %196 = lshr i32 %195, 27
+  %197 = lshr i32 %195, 11
+  %198 = and i32 %197, 15
+  %199 = shl nuw nsw i32 %197, 4
+  %200 = and i32 %199, 256
+  %201 = or i32 %200, %198
+  %202 = shl nuw nsw i32 %198, 2
+  %203 = or i32 %201, %202
+  %204 = and i32 %203, 307
+  %205 = shl nuw nsw i32 %204, 1
+  %206 = or i32 %205, %204
+  %207 = shl nuw nsw i32 %196, 4
+  %208 = or i32 %207, %196
+  %209 = and i32 %208, 271
+  %210 = shl nuw nsw i32 %209, 2
+  %211 = or i32 %210, %209
+  %212 = and i32 %211, 307
+  %213 = shl nuw nsw i32 %212, 1
+  %214 = or i32 %213, %212
+  %215 = and i32 %214, 341
+  %216 = shl nuw nsw i32 %206, 1
+  %217 = and i32 %216, 682
+  %218 = or i32 %215, %217
+  %219 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %218
+  %220 = atomicrmw add i32 addrspace(3)* %219, i32 1 seq_cst
+  br label %221
+
+; <label>:221                                     ; preds = %193, %188
+  %222 = phi i32 [ undef, %188 ], [ %218, %193 ]
+  %223 = or i32 %23, 6144
+  %224 = add i32 %223, %4
+  %225 = icmp ult i32 %224, %25
+  br i1 %225, label %226, label %254
+
+; <label>:226                                     ; preds = %221
+  %227 = call %dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32 139, %dx.types.Handle %2, i32 %224, i32 0, i8 1, i32 4)  ; RawBufferLoad(srv,index,elementOffset,mask,alignment)
+  %228 = extractvalue %dx.types.ResRet.i32 %227, 0
+  %229 = lshr i32 %228, 27
+  %230 = lshr i32 %228, 11
+  %231 = and i32 %230, 15
+  %232 = shl nuw nsw i32 %230, 4
+  %233 = and i32 %232, 256
+  %234 = or i32 %233, %231
+  %235 = shl nuw nsw i32 %231, 2
+  %236 = or i32 %234, %235
+  %237 = and i32 %236, 307
+  %238 = shl nuw nsw i32 %237, 1
+  %239 = or i32 %238, %237
+  %240 = shl nuw nsw i32 %229, 4
+  %241 = or i32 %240, %229
+  %242 = and i32 %241, 271
+  %243 = shl nuw nsw i32 %242, 2
+  %244 = or i32 %243, %242
+  %245 = and i32 %244, 307
+  %246 = shl nuw nsw i32 %245, 1
+  %247 = or i32 %246, %245
+  %248 = and i32 %247, 341
+  %249 = shl nuw nsw i32 %239, 1
+  %250 = and i32 %249, 682
+  %251 = or i32 %248, %250
+  %252 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %251
+  %253 = atomicrmw add i32 addrspace(3)* %252, i32 1 seq_cst
+  br label %254
+
+; <label>:254                                     ; preds = %226, %221
+  %255 = phi i32 [ %251, %226 ], [ undef, %221 ]
+  %256 = or i32 %23, 7168
+  %257 = add i32 %256, %4
+  %258 = icmp ult i32 %257, %25
+  br i1 %258, label %259, label %287
+
+; <label>:259                                     ; preds = %254
+  %260 = call %dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32 139, %dx.types.Handle %2, i32 %257, i32 0, i8 1, i32 4)  ; RawBufferLoad(srv,index,elementOffset,mask,alignment)
+  %261 = extractvalue %dx.types.ResRet.i32 %260, 0
+  %262 = lshr i32 %261, 27
+  %263 = lshr i32 %261, 11
+  %264 = and i32 %263, 15
+  %265 = shl nuw nsw i32 %263, 4
+  %266 = and i32 %265, 256
+  %267 = or i32 %266, %264
+  %268 = shl nuw nsw i32 %264, 2
+  %269 = or i32 %267, %268
+  %270 = and i32 %269, 307
+  %271 = shl nuw nsw i32 %270, 1
+  %272 = or i32 %271, %270
+  %273 = shl nuw nsw i32 %262, 4
+  %274 = or i32 %273, %262
+  %275 = and i32 %274, 271
+  %276 = shl nuw nsw i32 %275, 2
+  %277 = or i32 %276, %275
+  %278 = and i32 %277, 307
+  %279 = shl nuw nsw i32 %278, 1
+  %280 = or i32 %279, %278
+  %281 = and i32 %280, 341
+  %282 = shl nuw nsw i32 %272, 1
+  %283 = and i32 %282, 682
+  %284 = or i32 %281, %283
+  %285 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %284
+  %286 = atomicrmw add i32 addrspace(3)* %285, i32 1 seq_cst
+  br label %287
+
+; <label>:287                                     ; preds = %259, %254
+  %288 = phi i32 [ undef, %254 ], [ %284, %259 ]
+  call void @dx.op.barrier(i32 80, i32 9)  ; Barrier(barrierMode)
+  %289 = call i32 @dx.op.waveGetLaneCount(i32 112)  ; WaveGetLaneCount()
+  br i1 %19, label %290, label %302
+
+; <label>:290                                     ; preds = %287
+  %291 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %4
+  %292 = load i32, i32 addrspace(3)* %291, align 4, !tbaa !15
+  %293 = call i32 @dx.op.wavePrefixOp.i32(i32 121, i32 %292, i8 0, i8 0)  ; WavePrefixOp(value,op,sop)
+  %294 = add nsw i32 %293, %292
+  %295 = urem i32 %4, %289
+  %296 = sub i32 %4, %295
+  %297 = add i32 %4, 1
+  %298 = add i32 %289, -1
+  %299 = and i32 %298, %297
+  %300 = add i32 %299, %296
+  %301 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %300
+  store i32 %294, i32 addrspace(3)* %301, align 4, !tbaa !15
+  br label %302
+
+; <label>:302                                     ; preds = %290, %287
+  call void @dx.op.barrier(i32 80, i32 9)  ; Barrier(barrierMode)
+  %303 = udiv i32 1024, %289
+  %304 = icmp ult i32 %4, %303
+  br i1 %304, label %305, label %310
+
+; <label>:305                                     ; preds = %302
+  %306 = mul i32 %289, %4
+  %307 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %306
+  %308 = load i32, i32 addrspace(3)* %307, align 4, !tbaa !15
+  %309 = call i32 @dx.op.wavePrefixOp.i32(i32 121, i32 %308, i8 0, i8 0)  ; WavePrefixOp(value,op,sop)
+  store i32 %309, i32 addrspace(3)* %307, align 4, !tbaa !15
+  br label %310
+
+; <label>:310                                     ; preds = %305, %302
+  call void @dx.op.barrier(i32 80, i32 9)  ; Barrier(barrierMode)
+  br i1 %19, label %311, label %323
+
+; <label>:311                                     ; preds = %310
+  %312 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %4
+  %313 = load i32, i32 addrspace(3)* %312, align 4, !tbaa !15
+  %314 = add i32 %289, -1
+  %315 = and i32 %314, %4
+  %316 = icmp ne i32 %315, 0
+  %317 = select i1 %316, i32 %313, i32 0
+  %318 = urem i32 %4, %289
+  %319 = sub i32 %4, %318
+  %320 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %319
+  %321 = load i32, i32 addrspace(3)* %320, align 4, !tbaa !15
+  %322 = add i32 %317, %321
+  br label %323
+
+; <label>:323                                     ; preds = %311, %310
+  %324 = phi i32 [ %322, %311 ], [ undef, %310 ]
+  call void @dx.op.barrier(i32 80, i32 9)  ; Barrier(barrierMode)
+  br i1 %19, label %325, label %327
+
+; <label>:325                                     ; preds = %323
+  %326 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %4
+  store i32 %324, i32 addrspace(3)* %326, align 4, !tbaa !15
+  br label %327
+
+; <label>:327                                     ; preds = %325, %323
+  call void @dx.op.barrier(i32 80, i32 9)  ; Barrier(barrierMode)
+  br i1 %27, label %328, label %332
+
+; <label>:328                                     ; preds = %327
+  %329 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %57
+  %330 = atomicrmw add i32 addrspace(3)* %329, i32 1 seq_cst
+  %331 = add i32 %330, %23
+  call void @dx.op.rawBufferStore.i32(i32 140, %dx.types.Handle %1, i32 %331, i32 0, i32 %26, i32 undef, i32 undef, i32 undef, i8 1, i32 4)  ; RawBufferStore(uav,index,elementOffset,value0,value1,value2,value3,mask,alignment)
+  br label %332
+
+; <label>:332                                     ; preds = %328, %327
+  br i1 %60, label %333, label %337
+
+; <label>:333                                     ; preds = %332
+  %334 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %90
+  %335 = atomicrmw add i32 addrspace(3)* %334, i32 1 seq_cst
+  %336 = add i32 %335, %23
+  call void @dx.op.rawBufferStore.i32(i32 140, %dx.types.Handle %1, i32 %336, i32 0, i32 %59, i32 undef, i32 undef, i32 undef, i8 1, i32 4)  ; RawBufferStore(uav,index,elementOffset,value0,value1,value2,value3,mask,alignment)
+  br label %337
+
+; <label>:337                                     ; preds = %333, %332
+  br i1 %93, label %338, label %342
+
+; <label>:338                                     ; preds = %337
+  %339 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %123
+  %340 = atomicrmw add i32 addrspace(3)* %339, i32 1 seq_cst
+  %341 = add i32 %340, %23
+  call void @dx.op.rawBufferStore.i32(i32 140, %dx.types.Handle %1, i32 %341, i32 0, i32 %92, i32 undef, i32 undef, i32 undef, i8 1, i32 4)  ; RawBufferStore(uav,index,elementOffset,value0,value1,value2,value3,mask,alignment)
+  br label %342
+
+; <label>:342                                     ; preds = %338, %337
+  br i1 %126, label %343, label %347
+
+; <label>:343                                     ; preds = %342
+  %344 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %156
+  %345 = atomicrmw add i32 addrspace(3)* %344, i32 1 seq_cst
+  %346 = add i32 %345, %23
+  call void @dx.op.rawBufferStore.i32(i32 140, %dx.types.Handle %1, i32 %346, i32 0, i32 %125, i32 undef, i32 undef, i32 undef, i8 1, i32 4)  ; RawBufferStore(uav,index,elementOffset,value0,value1,value2,value3,mask,alignment)
+  br label %347
+
+; <label>:347                                     ; preds = %343, %342
+  br i1 %159, label %348, label %352
+
+; <label>:348                                     ; preds = %347
+  %349 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %189
+  %350 = atomicrmw add i32 addrspace(3)* %349, i32 1 seq_cst
+  %351 = add i32 %350, %23
+  call void @dx.op.rawBufferStore.i32(i32 140, %dx.types.Handle %1, i32 %351, i32 0, i32 %158, i32 undef, i32 undef, i32 undef, i8 1, i32 4)  ; RawBufferStore(uav,index,elementOffset,value0,value1,value2,value3,mask,alignment)
+  br label %352
+
+; <label>:352                                     ; preds = %348, %347
+  br i1 %192, label %353, label %357
+
+; <label>:353                                     ; preds = %352
+  %354 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %222
+  %355 = atomicrmw add i32 addrspace(3)* %354, i32 1 seq_cst
+  %356 = add i32 %355, %23
+  call void @dx.op.rawBufferStore.i32(i32 140, %dx.types.Handle %1, i32 %356, i32 0, i32 %191, i32 undef, i32 undef, i32 undef, i8 1, i32 4)  ; RawBufferStore(uav,index,elementOffset,value0,value1,value2,value3,mask,alignment)
+  br label %357
+
+; <label>:357                                     ; preds = %353, %352
+  br i1 %225, label %358, label %362
+
+; <label>:358                                     ; preds = %357
+  %359 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %255
+  %360 = atomicrmw add i32 addrspace(3)* %359, i32 1 seq_cst
+  %361 = add i32 %360, %23
+  call void @dx.op.rawBufferStore.i32(i32 140, %dx.types.Handle %1, i32 %361, i32 0, i32 %224, i32 undef, i32 undef, i32 undef, i8 1, i32 4)  ; RawBufferStore(uav,index,elementOffset,value0,value1,value2,value3,mask,alignment)
+  br label %362
+
+; <label>:362                                     ; preds = %358, %357
+  br i1 %258, label %363, label %367
+
+; <label>:363                                     ; preds = %362
+  %364 = getelementptr [1024 x i32], [1024 x i32] addrspace(3)* @"\01?s_bucket@@3PAHA", i32 0, i32 %288
+  %365 = atomicrmw add i32 addrspace(3)* %364, i32 1 seq_cst
+  %366 = add i32 %365, %23
+  call void @dx.op.rawBufferStore.i32(i32 140, %dx.types.Handle %1, i32 %366, i32 0, i32 %257, i32 undef, i32 undef, i32 undef, i8 1, i32 4)  ; RawBufferStore(uav,index,elementOffset,value0,value1,value2,value3,mask,alignment)
+  br label %367
+
+; <label>:367                                     ; preds = %363, %362
+  ret void
+}
+
+; Function Attrs: nounwind readnone
+declare i32 @dx.op.threadIdInGroup.i32(i32, i32) #0
+
+; Function Attrs: nounwind readnone
+declare i32 @dx.op.groupId.i32(i32, i32) #0
+
+; Function Attrs: nounwind readonly
+declare %dx.types.CBufRet.f32 @dx.op.cbufferLoadLegacy.f32(i32, %dx.types.Handle, i32) #1
+
+; Function Attrs: nounwind readnone
+declare float @dx.op.unary.f32(i32, float) #0
+
+; Function Attrs: noduplicate nounwind
+declare void @dx.op.barrier(i32, i32) #2
+
+; Function Attrs: nounwind readnone
+declare i32 @dx.op.binary.i32(i32, i32, i32) #0
+
+; Function Attrs: nounwind readonly
+declare %dx.types.ResRet.i32 @dx.op.rawBufferLoad.i32(i32, %dx.types.Handle, i32, i32, i8, i32) #1
+
+; Function Attrs: nounwind
+declare void @dx.op.rawBufferStore.i32(i32, %dx.types.Handle, i32, i32, i32, i32, i32, i32, i8, i32) #3
+
+; Function Attrs: nounwind
+declare i32 @dx.op.wavePrefixOp.i32(i32, i32, i8, i8) #3
+
+; Function Attrs: nounwind readnone
+declare i32 @dx.op.waveGetLaneCount(i32) #0
+
+; Function Attrs: nounwind readonly
+declare %dx.types.Handle @dx.op.createHandle(i32, i8, i32, i32, i1) #1
+
+attributes #0 = { nounwind readnone }
+attributes #1 = { nounwind readonly }
+attributes #2 = { noduplicate nounwind }
+attributes #3 = { nounwind }
+
+!llvm.ident = !{!0}
+!dx.version = !{!1}
+!dx.valver = !{!1}
+!dx.shaderModel = !{!2}
+!dx.resources = !{!3}
+!dx.entryPoints = !{!11}
+
+!0 = !{!"dxc 1.2"}
+!1 = !{i32 1, i32 5}
+!2 = !{!"cs", i32 6, i32 5}
+!3 = !{!4, !7, !9, null}
+!4 = !{!5}
+!5 = !{i32 0, %"class.StructuredBuffer<unsigned int>"* undef, !"", i32 0, i32 0, i32 1, i32 12, i32 0, !6}
+!6 = !{i32 1, i32 4}
+!7 = !{!8}
+!8 = !{i32 0, %"class.RWStructuredBuffer<unsigned int>"* undef, !"", i32 0, i32 0, i32 1, i32 12, i1 false, i1 false, i1 false, !6}
+!9 = !{!10}
+!10 = !{i32 0, %dx.alignment.legacy.RayTracingDenoiserConstantBufferInfo* undef, !"", i32 0, i32 0, i32 1, i32 208, null}
+!11 = !{void ()* @rayTracingBinning_main, !"rayTracingBinning_main", null, !3, !12}
+!12 = !{i32 0, i64 524304, i32 4, !13, i32 5, !14}
+!13 = !{i32 1024, i32 1, i32 1}
+!14 = !{i32 0}
+!15 = !{!16, !16, i64 0}
+!16 = !{!"int", !17, i64 0}
+!17 = !{!"omnipotent char", !18, i64 0}
+!18 = !{!"Simple C/C++ TBAA"}
+
