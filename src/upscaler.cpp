@@ -417,16 +417,136 @@ std::vector<uint32_t> SceneInfoParams(device* dev, const StageState& st) {
     return out;
 }
 
-bool ReadSceneInfo(device* dev, const StageState& st, float* out) {
-    for (uint32_t param : SceneInfoParams(dev, st)) {
-        const buffer_range& b = st.roots.at(param).range;
-        void* data = nullptr;
-        if (!dev->map_buffer_region(b.buffer, b.offset, kSceneInfoFloats * 4, map_access::read_only, &data) || !data)
-            continue;
-        memcpy(out, data, kSceneInfoFloats * 4);
-        dev->unmap_buffer_region(b.buffer);
+// ---------------------------------------------------------------- reading constant buffers
+//
+// Constant buffers (SceneInfo) are read on the CPU when a pass is recorded. Usually they're in
+// upload memory and can be mapped. Some systems (seen on Radeon cards: "camera constants
+// (SceneInfo) not found") keep them in GPU-only memory, filled by a copy from upload memory:
+// once a buffer can't be mapped, buffer copies are noted, and such a buffer is read from the
+// upload buffer it was copied from (as in RE4DLSS 1.2.2).
+
+std::atomic<bool> g_trackCopies{false};
+struct CopySource {
+    uint64_t size;
+    resource src;
+    uint64_t srcOffset;
+};
+std::mutex g_copyMutex;
+std::map<uint64_t, std::map<uint64_t, CopySource>> g_copies;  // destination buffer -> its offset -> source
+std::map<uint64_t, bool> g_copySources;                        // the source buffers seen
+size_t g_copyCount = 0;
+
+void NoteCopy(resource src, uint64_t srcOffset, resource dst, uint64_t dstOffset, uint64_t size) {
+    std::lock_guard<std::mutex> lock(g_copyMutex);
+    if (g_copyCount > 65536) {
+        g_copies.clear();
+        g_copySources.clear();
+        g_copyCount = 0;
+    }
+    if (g_copies[dst.handle].insert_or_assign(dstOffset, CopySource{size, src, srcOffset}).second) ++g_copyCount;
+    g_copySources[src.handle] = true;
+}
+
+bool CbOnCopyBuffer(command_list*, resource src, uint64_t srcOffset, resource dst, uint64_t dstOffset, uint64_t size) {
+    if (g_trackCopies.load(std::memory_order_relaxed)) NoteCopy(src, srcOffset, dst, dstOffset, size);
+    return false;
+}
+
+bool CbOnCopyResource(command_list* cl, resource src, resource dst) {
+    if (!g_trackCopies.load(std::memory_order_relaxed)) return false;
+    device* dev = cl->get_device();
+    const resource_desc a = dev->get_resource_desc(src), b = dev->get_resource_desc(dst);
+    if (a.type == resource_type::buffer && b.type == resource_type::buffer) NoteCopy(src, 0, dst, 0, b.buffer.size);
+    return false;
+}
+
+// A destroyed buffer mustn't be mapped later: forget copies into it, and all of them if it was a source.
+void CbOnDestroyResource(device*, resource r) {
+    if (!g_trackCopies.load(std::memory_order_relaxed)) return;
+    std::lock_guard<std::mutex> lock(g_copyMutex);
+    if (g_copySources.count(r.handle)) {
+        g_copies.clear();
+        g_copySources.clear();
+        g_copyCount = 0;
+    } else if (auto it = g_copies.find(r.handle); it != g_copies.end()) {
+        g_copyCount -= it->second.size();
+        g_copies.erase(it);
+    }
+}
+
+bool CopySourceOf(const buffer_range& r, uint64_t bytes, resource* src, uint64_t* srcOffset) {
+    std::lock_guard<std::mutex> lock(g_copyMutex);
+    const auto b = g_copies.find(r.buffer.handle);
+    if (b == g_copies.end()) return false;
+    auto it = b->second.upper_bound(r.offset);
+    if (it == b->second.begin()) return false;
+    --it;
+    const uint64_t end = it->second.size == UINT64_MAX ? UINT64_MAX : it->first + it->second.size;
+    if (r.offset + bytes > end) return false;
+    *src = it->second.src;
+    *srcOffset = it->second.srcOffset + (r.offset - it->first);
+    return true;
+}
+
+// Reads <bytes> of a buffer: mapped when the CPU can, else through the copy that filled it.
+// *how says which (or why neither worked).
+bool ReadBuffer(device* dev, const buffer_range& r, uint32_t bytes, void* out, std::string* how) {
+    const resource_desc d = dev->get_resource_desc(r.buffer);
+    char msg[200];
+    void* data = nullptr;
+    if (d.heap != memory_heap::default_ && dev->map_buffer_region(r.buffer, r.offset, bytes, map_access::read_only, &data) && data) {
+        memcpy(out, data, bytes);
+        dev->unmap_buffer_region(r.buffer);
+        snprintf(msg, sizeof(msg), "mapped (memory heap %d)", static_cast<int>(d.heap));
+        *how = msg;
         return true;
     }
+    g_trackCopies = true;
+    resource src = {0};
+    uint64_t srcOffset = 0;
+    if (CopySourceOf(r, bytes, &src, &srcOffset)) {
+        const resource_desc sd = dev->get_resource_desc(src);
+        data = nullptr;
+        if (sd.heap != memory_heap::default_ && dev->map_buffer_region(src, srcOffset, bytes, map_access::read_only, &data) && data) {
+            memcpy(out, data, bytes);
+            dev->unmap_buffer_region(src);
+            snprintf(msg, sizeof(msg), "memory heap %d, read from the buffer copied into it (heap %d)",
+                     static_cast<int>(d.heap), static_cast<int>(sd.heap));
+            *how = msg;
+            return true;
+        }
+        snprintf(msg, sizeof(msg), "memory heap %d can't be read, nor the buffer copied into it (heap %d)",
+                 static_cast<int>(d.heap), static_cast<int>(sd.heap));
+        *how = msg;
+        return false;
+    }
+    snprintf(msg, sizeof(msg), "memory heap %d (buffer size %llu) can't be read, and no copy into it was seen",
+             static_cast<int>(d.heap), static_cast<unsigned long long>(d.buffer.size));
+    *how = msg;
+    return false;
+}
+
+// Where SceneInfo came from, logged when that changes (and why it couldn't be read).
+void NoteSceneInfoRead(const std::string& how, bool ok) {
+    static std::mutex m;
+    static std::string last;
+    std::lock_guard<std::mutex> lock(m);
+    const std::string now = (ok ? "camera constants (SceneInfo): " : "camera constants (SceneInfo) not readable: ") + how;
+    if (now == last) return;
+    last = now;
+    Log("%s", now.c_str());
+}
+
+bool ReadSceneInfo(device* dev, const StageState& st, float* out) {
+    std::string how = "no SceneInfo constant buffer bound";
+    for (uint32_t param : SceneInfoParams(dev, st)) {
+        const buffer_range& b = st.roots.at(param).range;
+        if (ReadBuffer(dev, b, kSceneInfoFloats * 4, out, &how)) {
+            NoteSceneInfoRead(how, true);
+            return true;
+        }
+    }
+    NoteSceneInfoRead(how, false);
     return false;
 }
 
@@ -2085,6 +2205,9 @@ void UpscalerInit() {
     reshade::register_event<reshade::addon_event::create_sampler>(&OnCreateSampler);
     reshade::register_event<reshade::addon_event::barrier>(&OnBarrier);
     reshade::register_event<reshade::addon_event::destroy_resource>(&RtOnDestroyResource);
+    reshade::register_event<reshade::addon_event::copy_buffer_region>(&CbOnCopyBuffer);
+    reshade::register_event<reshade::addon_event::copy_resource>(&CbOnCopyResource);
+    reshade::register_event<reshade::addon_event::destroy_resource>(&CbOnDestroyResource);
     RegisterFrameGen();
     const float scale = g_set.enabled && g_set.mode > 0 ? kModes[g_set.mode].scale : StartupRenderScale();
     if (g_set.enabled && g_set.upscale && g_set.textureDetail && scale < 0.99f) g_mipBias = std::log2(scale);
@@ -2108,6 +2231,9 @@ void UpscalerShutdown() {
     reshade::unregister_event<reshade::addon_event::create_sampler>(&OnCreateSampler);
     reshade::unregister_event<reshade::addon_event::barrier>(&OnBarrier);
     reshade::unregister_event<reshade::addon_event::destroy_resource>(&RtOnDestroyResource);
+    reshade::unregister_event<reshade::addon_event::copy_buffer_region>(&CbOnCopyBuffer);
+    reshade::unregister_event<reshade::addon_event::copy_resource>(&CbOnCopyResource);
+    reshade::unregister_event<reshade::addon_event::destroy_resource>(&CbOnDestroyResource);
     UnregisterFrameGen();
 }
 

@@ -1,4 +1,4 @@
-# VillageDLSS 1.2.0
+# VillageDLSS 1.2.1
 
 ReShade add-on for **Resident Evil Village** (DirectX 12) that replaces the game's TAA
 with **NVIDIA DLSS** or **AMD FSR 3.1 / FSR 4**, and adds **DLSS or FSR frame generation** and
@@ -51,7 +51,7 @@ Settings, Status and Advanced tabs. They're saved in `ReShade.ini` under `[Villa
 
 ## Install
 
-**With Fluffy Mod Manager**: put `VillageDLSS-1.2.0.zip` in Fluffy Mod Manager's `Games\RE8\Mods`
+**With Fluffy Mod Manager**: put `VillageDLSS-1.2.1.zip` in Fluffy Mod Manager's `Games\RE8\Mods`
 folder (or drag it onto the manager) and enable it. It installs into the game folder:
 
 - `VillageDLSS.addon64` (the add-on), `nvngx_dlss.dll` and `nvngx_dlssd.dll` (NVIDIA's DLSS and
