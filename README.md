@@ -84,6 +84,10 @@ If the NVIDIA App has a DLSS model override for the game, it takes precedence ov
   upscaled render resolution down to Ultra Performance, with the same tone as DLAA, and DLSS frame
   generation 2x in exclusive full screen; Ray Reconstruction at DLAA and Quality with ray tracing on.
   FSR and FSR frame generation are the same code as RE7DLSS 1.1.1, where they were tested.
+- Known issue: with Ray Reconstruction on, parts of Ethan (his head and hands) can flicker in and
+  out. Plain DLSS doesn't do it, and no Ray Reconstruction model avoids it; it seems to be how
+  Ray Reconstruction treats the way the game fades him when the camera is close. Turn Ray
+  Reconstruction off if it bothers you.
 - Works with REFramework: REFramework hooks NVIDIA's frame generation DLL in a way that would hang
   the game at launch; the add-on steps around that hook while the game's swapchain is created.
 - FSR 3.1/4 and FSR frame generation through this add-on are untested on Radeon cards so far.

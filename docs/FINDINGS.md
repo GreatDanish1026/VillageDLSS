@@ -190,3 +190,14 @@ Village skips rayTracingUpscale on some frames: Ray Reconstruction is kept while
 
 Test (2026-11-09, 4K HDR, RT on): RR at DLAA and Quality (2561x1440 -> 3840x2160), camera ok, models NVIDIA default and F,
 back to Super Resolution only across real ray tracing gaps at scene changes.
+
+## Ethan flickering with Ray Reconstruction (known issue, 2026-11-11)
+
+User: Ethan's head and hands flicker in and out with Ray Reconstruction on; plain DLSS is fine;
+seen before 1.2.1. Checked: one rayTracingUpscale (cs4206d838) per frame reading the same
+G-buffer (#35891 base, #35594 normal; written only by the G-buffer passes, nothing in between);
+the guide shader decodes it like the game's rayTracingUpscale (metallic only when misc > 0.667).
+The guide view shows him flickering too. Diagnostic builds giving RR flat colour/reflectivity
+guides, then flat normals as well, didn't help; RR models D, E, F and default all do it. Likely
+RR's denoiser removing the game's dithered camera-near fade (not confirmed). Left as a known
+issue (README); a possible fix would be DLSS-RR's bias-current-colour mask over those pixels.
