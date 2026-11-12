@@ -117,6 +117,7 @@ struct Settings {
     bool sharpen = true;   // the game's sharpening at output size when upscaling
     bool textureDetail = true;  // negative mip bias on material samplers (applied at game start)
     bool gameExposure = true;   // DLSS/FSR get the colour's real exposure (1.0) instead of guessing it
+    bool fullResReflections = false;  // REFramework script: ray traced reflections at full resolution
     bool effectMask = true;     // DLSS/FSR get the TAA's effect mask (games that have one)
     int mode = 0;          // DLSS mode setting the render scale through VillageDLSS.lua (0: the game's slider)
     // DLSS Ray Reconstruction in place of Super Resolution while the game ray traces (ini
@@ -149,6 +150,7 @@ void LoadSettings() {
     reshade::get_config_value(nullptr, RD_PRODUCT, "Sharpen", g_set.sharpen);
     reshade::get_config_value(nullptr, RD_PRODUCT, "TextureDetail", g_set.textureDetail);
     reshade::get_config_value(nullptr, RD_PRODUCT, "GameExposure", g_set.gameExposure);
+    reshade::get_config_value(nullptr, RD_PRODUCT, "FullResReflections", g_set.fullResReflections);
     reshade::get_config_value(nullptr, RD_PRODUCT, "EffectMask", g_set.effectMask);
     reshade::get_config_value(nullptr, RD_PRODUCT, "Mode", g_set.mode);
     if (g_set.mode < 0 || g_set.mode >= kModeCount) g_set.mode = 0;
@@ -169,6 +171,7 @@ void SaveSettings() {
     reshade::set_config_value(nullptr, RD_PRODUCT, "Sharpen", g_set.sharpen);
     reshade::set_config_value(nullptr, RD_PRODUCT, "TextureDetail", g_set.textureDetail);
     reshade::set_config_value(nullptr, RD_PRODUCT, "GameExposure", g_set.gameExposure);
+    reshade::set_config_value(nullptr, RD_PRODUCT, "FullResReflections", g_set.fullResReflections);
     reshade::set_config_value(nullptr, RD_PRODUCT, "EffectMask", g_set.effectMask);
     reshade::set_config_value(nullptr, RD_PRODUCT, "Mode", g_set.mode);
     reshade::set_config_value(nullptr, RD_PRODUCT, "RayReconstruction", g_set.rr);
@@ -1915,6 +1918,33 @@ bool ScriptStatus(float* scale) {
     return true;
 }
 
+// Full-resolution ray traced reflections, set by the REFramework script (VillageDLSS.lua): the wanted
+// SpecularResolution (0 = full, -1 = the game's) in reframework/data/VillageDLSS_rt.txt.
+void WriteWantedRt() {
+    static int written = -2;
+    const int want = g_set.fullResReflections ? 0 : -1;
+    if (want == written) return;
+    const std::wstring fw = ExeDir() + L"reframework";
+    if (GetFileAttributesW(fw.c_str()) == INVALID_FILE_ATTRIBUTES) return;  // no REFramework
+    CreateDirectoryW((fw + L"\\data").c_str(), nullptr);
+    if (FILE* f = _wfopen((fw + L"\\data\\VillageDLSS_rt.txt").c_str(), L"w")) {
+        fprintf(f, "%d\n", want);
+        fclose(f);
+        written = want;
+        Log("reflections for VillageDLSS.lua: %s", want == 0 ? "full resolution" : "the game's resolution");
+    }
+}
+
+// The script's report: the reflections' resolution now (0 full, 1 half), or -1 if unknown.
+int RtResolutionNow() {
+    FILE* f = _wfopen((ExeDir() + L"reframework\\data\\VillageDLSS_rt_status.txt").c_str(), L"r");
+    if (!f) return -1;
+    int v = -1;
+    if (fscanf(f, "%d", &v) != 1) v = -1;
+    fclose(f);
+    return v;
+}
+
 bool g_keyWasDown = false;
 bool g_wasEnabled = false;
 bool g_samplerStatsLogged = false;
@@ -1975,6 +2005,7 @@ bool UpscalerOnDraw(command_list* cl, uint32_t vertices, uint32_t instances) {
 }
 
 void UpscalerPresent(swapchain* sc) {
+    WriteWantedRt();
     dlss::EndFrame();
     fsr::EndFrame();
     if (g_frame % 600 == 599) {
@@ -2204,6 +2235,14 @@ void UpscalerOverlay() {
         changed |= ImGui::Checkbox("Use the game's exposure", &g_set.gameExposure);
         Help("Tells DLSS and FSR the picture's real exposure instead of letting them estimate it: steadier "
              "brightness and less ghosting when the lighting changes.");
+        changed |= ImGui::Checkbox("Full-resolution reflections", &g_set.fullResReflections);
+        Help("Ray traces reflections at the full render resolution instead of the game's reduced one: sharper "
+             "reflections, especially with Ray Reconstruction, at a GPU cost. Needs REFramework (the bundled "
+             "VillageDLSS.lua sets it) and the game's ray tracing on.");
+        if (g_set.fullResReflections) {
+            const int now = RtResolutionNow();
+            ImGui::TextDisabled("Reflections now: %s", now == 0 ? "full resolution" : now == 1 ? "half resolution" : "unknown (is REFramework running?)");
+        }
         changed |= ImGui::Checkbox("Sharper textures at lower render resolutions", &g_set.textureDetail);
         Help("A mip bias of log2(render scale) on the game's material textures, as NVIDIA recommends. Set when "
              "the game starts: restart after changing the render resolution.");
