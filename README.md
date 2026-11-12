@@ -32,14 +32,15 @@ support, and REFramework for the render resolution dropdown.
   screen works. Switching it on, or between DLSS and FSR, takes a game
   restart.
 - **Sharper textures at lower render sizes** (on by default): a mip bias of log2(render scale) on
-  the game's material textures, as NVIDIA recommends. Set when the game starts, so after changing
-  the render resolution, restart the game for the textures to follow.
+  the game's material textures, as NVIDIA recommends. It follows the render resolution as it changes, without a restart.
 - **DLSS model**: Automatic (default: K, M at Performance, L at Ultra Performance, as NVIDIA recommends), or K, J, L or M (DLSS 4.5) at every resolution, or NVIDIA's default.
 - **Game exposure** (on by default, Advanced tab): DLSS and FSR get the picture's real exposure (the game's colour is already exposed) instead of
   estimating it themselves: steadier brightness and less ghosting when the lighting changes.
 - **Full-resolution reflections** (off by default, Advanced tab): the bundled REFramework script
   makes the game ray trace its reflections at the full render resolution instead of a reduced one:
   sharper reflections, especially with Ray Reconstruction, at a GPU cost. (Resident Evil Village may ignore this setting.)
+- **Sharpening** (Settings tab, off by default): extra contrast-adaptive sharpening of the upscaled
+  image (AMD's RCAS): after DLSS and Ray Reconstruction, or FSR's own for FSR.
 - **Ray Reconstruction** (experimental, DLSS only, off by default): with the game's ray tracing on,
   NVIDIA's DLSS Ray Reconstruction 310.9.16 replaces DLSS Super Resolution. It upscales and cleans up
   the remaining noise in the ray-traced lighting and reflections, on top of the game's own ray
