@@ -64,6 +64,7 @@
 #include "blit_vs.h"
 #include "guide_cs.h"       // kGuideCs: guide.hlsl (Ray Reconstruction guides from the G-buffer)
 #include "guide_view_cs.h"  // kGuideViewCs: guide_view.hlsl (guide debug view)
+#include "rcas_cs.h"        // kRcasCs: rcas.hlsl (sharpening after DLSS)
 #include "dlss.hpp"
 #include "fsr.hpp"
 #include "version.h"
@@ -117,6 +118,7 @@ struct Settings {
     bool sharpen = true;   // the game's sharpening at output size when upscaling
     bool textureDetail = true;  // negative mip bias on material samplers (applied at game start)
     bool gameExposure = true;   // DLSS/FSR get the colour's real exposure (1.0) instead of guessing it
+    float sharpness = 0;        // extra sharpening after DLSS/FSR (RCAS), 0 = off
     bool fullResReflections = false;  // REFramework script: ray traced reflections at full resolution
     bool effectMask = true;     // DLSS/FSR get the TAA's effect mask (games that have one)
     int mode = 0;          // DLSS mode setting the render scale through VillageDLSS.lua (0: the game's slider)
@@ -150,6 +152,8 @@ void LoadSettings() {
     reshade::get_config_value(nullptr, RD_PRODUCT, "Sharpen", g_set.sharpen);
     reshade::get_config_value(nullptr, RD_PRODUCT, "TextureDetail", g_set.textureDetail);
     reshade::get_config_value(nullptr, RD_PRODUCT, "GameExposure", g_set.gameExposure);
+    reshade::get_config_value(nullptr, RD_PRODUCT, "Sharpness", g_set.sharpness);
+    if (!(g_set.sharpness >= 0 && g_set.sharpness <= 1)) g_set.sharpness = 0;
     reshade::get_config_value(nullptr, RD_PRODUCT, "FullResReflections", g_set.fullResReflections);
     reshade::get_config_value(nullptr, RD_PRODUCT, "EffectMask", g_set.effectMask);
     reshade::get_config_value(nullptr, RD_PRODUCT, "Mode", g_set.mode);
@@ -171,6 +175,7 @@ void SaveSettings() {
     reshade::set_config_value(nullptr, RD_PRODUCT, "Sharpen", g_set.sharpen);
     reshade::set_config_value(nullptr, RD_PRODUCT, "TextureDetail", g_set.textureDetail);
     reshade::set_config_value(nullptr, RD_PRODUCT, "GameExposure", g_set.gameExposure);
+    reshade::set_config_value(nullptr, RD_PRODUCT, "Sharpness", g_set.sharpness);
     reshade::set_config_value(nullptr, RD_PRODUCT, "FullResReflections", g_set.fullResReflections);
     reshade::set_config_value(nullptr, RD_PRODUCT, "EffectMask", g_set.effectMask);
     reshade::set_config_value(nullptr, RD_PRODUCT, "Mode", g_set.mode);
@@ -1353,6 +1358,76 @@ void OnBarrier(command_list* cl, uint32_t count, const resource* res, const reso
 // The exposure DLSS and FSR are told about: the TAA's colour is already exposed (the tonemapper
 // takes it as it is), so 1.0, in a 1x1 r32f texture made once. Without it they estimate an
 // exposure of their own (auto-exposure), which can pump and ghost when the lighting changes.
+// ---------------------------------------------------------------- sharpening (RCAS)
+//
+// With the Sharpening slider above 0, DLSS / Ray Reconstruction write into g_xs and AMD's RCAS
+// (rcas.hlsl) writes the sharpened image into g_x, where DLSS's output normally goes; everything
+// after it is unchanged. FSR uses its own RCAS (the same slider). g_resMutex held.
+Texture g_xs;  // DLSS's output before sharpening
+pipeline_layout g_rcasLayout = {0};
+pipeline g_rcasPipe = {0};
+bool g_rcasFailed = false;
+resource_view g_xUav = {0};
+uint64_t g_xUavOf = 0;
+
+bool RcasReady(device* dev) {
+    if (g_rcasPipe.handle) return true;
+    if (g_rcasFailed) return false;
+    constant_range c = {};
+    c.count = 8;
+    c.visibility = shader_stage::all_compute;
+    descriptor_range srv = {};
+    srv.count = 1;
+    srv.visibility = shader_stage::all_compute;
+    srv.type = descriptor_type::shader_resource_view;
+    descriptor_range uav = srv;
+    uav.type = descriptor_type::unordered_access_view;
+    const pipeline_layout_param params[3] = {pipeline_layout_param(c), pipeline_layout_param(srv), pipeline_layout_param(uav)};
+    shader_desc cs = {};
+    cs.code = kRcasCs;
+    cs.code_size = sizeof(kRcasCs);
+    pipeline_subobject sub = {pipeline_subobject_type::compute_shader, 1, &cs};
+    if (!dev->create_pipeline_layout(3, params, &g_rcasLayout) || !dev->create_pipeline(g_rcasLayout, 1, &sub, &g_rcasPipe)) {
+        g_rcasFailed = true;
+        g_rcasPipe = {0};
+        Log("couldn't create the sharpening shader: DLSS isn't sharpened");
+        return false;
+    }
+    Log("sharpening shader (RCAS) created");
+    return true;
+}
+
+// g_xs (DLSS's output) -> g_x, sharpened.
+void Sharpen(command_list* cl, device* dev) {
+    if (g_xUavOf != g_x.res.handle) {
+        if (g_xUav.handle) dev->destroy_resource_view(g_xUav);
+        g_xUav = {0};
+        dev->create_resource_view(g_x.res, resource_usage::unordered_access, resource_view_desc(g_x.fmt), &g_xUav);
+        g_xUavOf = g_x.res.handle;
+    }
+    if (!g_xUav.handle || !g_xs.srv.handle) return;
+    Transition(cl, g_xs, resource_usage::shader_resource);
+    Transition(cl, g_x, resource_usage::unordered_access);
+    uint32_t params[8] = {};
+    const float sharpness = g_set.sharpness;
+    memcpy(&params[0], &sharpness, 4);
+    params[4] = g_x.w, params[5] = g_x.h;
+    cl->bind_pipeline(pipeline_stage::all_compute, g_rcasPipe);
+    cl->push_constants(shader_stage::all_compute, g_rcasLayout, 0, 0, 8, params);
+    descriptor_table_update u = {};
+    u.count = 1;
+    u.type = descriptor_type::shader_resource_view;
+    u.descriptors = &g_xs.srv;
+    cl->push_descriptors(shader_stage::all_compute, g_rcasLayout, 1, u);
+    u.type = descriptor_type::unordered_access_view;
+    u.descriptors = &g_xUav;
+    cl->push_descriptors(shader_stage::all_compute, g_rcasLayout, 2, u);
+    cl->dispatch((g_x.w + 7) / 8, (g_x.h + 7) / 8, 1);
+    Transition(cl, g_xs, resource_usage::unordered_access);  // DLSS writes it next frame
+    static bool logged = false;
+    if (!logged) logged = true, Log("DLSS output sharpened (RCAS, strength %.2f)", sharpness);
+}
+
 std::atomic<float> g_renderScale{1};  // render width / output width at the last TAA (1 when not upscaling)
 resource g_exposureOne = {0};
 
@@ -1437,6 +1512,10 @@ bool OnTaa(command_list* cl, ListState& s) {
     const bool reset = CameraCut(scene);
     auto* list = reinterpret_cast<ID3D12GraphicsCommandList*>(cl->get_native());
     Transition(cl, g_x, resource_usage::unordered_access);
+    const bool sharpenDlss = tech == Tech::Dlss && g_set.sharpness >= 0.005f && RcasReady(dev) &&
+                             Ensure(dev, g_xs, outW, outH, td.texture.format, usage, resource_usage::unordered_access,
+                                    "DLSS output before sharpening");
+    if (sharpenDlss) Transition(cl, g_xs, resource_usage::unordered_access);
     bool ok;
     bool usedRr = false;
     if (tech == Tech::Dlss) {
@@ -1444,7 +1523,8 @@ bool OnTaa(command_list* cl, ListState& s) {
         in.color = reinterpret_cast<ID3D12Resource*>(color.handle);
         in.depth = reinterpret_cast<ID3D12Resource*>(depth.handle);
         in.motion = reinterpret_cast<ID3D12Resource*>(motion.handle);
-        in.output = reinterpret_cast<ID3D12Resource*>(g_x.res.handle);
+        in.output = reinterpret_cast<ID3D12Resource*>((sharpenDlss ? g_xs : g_x).res.handle);
+        in.key = &g_x;  // one history, sharpened or not
         in.renderWidth = renderW, in.renderHeight = renderH;
         in.outputWidth = outW, in.outputHeight = outH;
         in.jitterX = jitterX, in.jitterY = jitterY;
@@ -1477,6 +1557,7 @@ bool OnTaa(command_list* cl, ListState& s) {
             }
         }
         ok = dlss::Evaluate(list, in, err);
+        if (ok && sharpenDlss) Sharpen(cl, dev);
         if (ok && in.rr) {
             usedRr = true;
             g_rt.error.clear();
@@ -1505,7 +1586,7 @@ bool OnTaa(command_list* cl, ListState& s) {
         in.cameraFar = 0;  // RE Engine: reversed Z, infinite far plane
         in.cameraFovY = yScale > 0.05f ? 2 * std::atan(1 / yScale) : 1.0f;
         in.metersPerUnit = 1.0f;  // RE Engine: metres
-        in.sharpness = 0;
+        in.sharpness = g_set.sharpness;
         in.reset = reset;
         ok = fsr::Evaluate(list, in, err);
     }
@@ -1812,7 +1893,12 @@ void DestroyAll(device* dev) {
     g_targetRtvs.clear();
     dlss::Shutdown();
     fsr::Shutdown();
-    for (Texture* t : {&g_x, &g_y, &g_z, &g_hudScene}) Retire(*t);
+    for (Texture* t : {&g_x, &g_xs, &g_y, &g_z, &g_hudScene}) Retire(*t);
+    if (g_xUav.handle) dev->destroy_resource_view(g_xUav);
+    g_xUav = {0}, g_xUavOf = 0;
+    if (g_rcasPipe.handle) dev->destroy_pipeline(g_rcasPipe);
+    if (g_rcasLayout.handle) dev->destroy_pipeline_layout(g_rcasLayout);
+    g_rcasPipe = {0}, g_rcasLayout = {0};
     if (g_exposureOne.handle) dev->destroy_resource(g_exposureOne);
     g_exposureOne = {0};
     for (Old& o : g_old) {
@@ -2266,6 +2352,11 @@ void UpscalerOverlay() {
             }
             ImGui::EndDisabled();
         }
+        ImGui::SetNextItemWidth(ControlWidth());
+        if (ImGui::SliderFloat("Sharpening", &g_set.sharpness, 0.0f, 1.0f, g_set.sharpness < 0.005f ? "Off" : "%.2f"))
+            changed = true;
+        Help("Extra sharpening of the upscaled image (AMD's RCAS, contrast-adaptive: crisper edges without "
+             "halos). 0 = off. For DLSS and Ray Reconstruction it runs after them; for FSR it's FSR's own.");
         ImGui::EndDisabled();
         DrawFrameGenSettings();
         ImGui::EndTabItem();
