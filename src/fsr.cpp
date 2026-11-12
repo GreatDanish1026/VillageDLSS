@@ -41,6 +41,7 @@ struct Context {
     LARGE_INTEGER lastEval = {};  // for the frame time
     float tuning[3] = {-99, -99, -99};  // last applied velocity factor, min disocclusion, shading change
     bool debug = false;  // created with FFX_UPSCALE_ENABLE_DEBUG_VISUALIZATION
+    bool autoExposure = true;  // created with FFX_UPSCALE_ENABLE_AUTO_EXPOSURE (no exposure texture given)
 };
 
 std::string Code(ffxReturnCode_t r);
@@ -136,7 +137,8 @@ bool CreateContext(const Inputs& in, Context& c, std::string& error) {
     ffxCreateContextDescUpscale desc = {};
     desc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_UPSCALE;
     desc.flags = FFX_UPSCALE_ENABLE_HIGH_DYNAMIC_RANGE | FFX_UPSCALE_ENABLE_DEPTH_INVERTED |
-                 (in.cameraFar <= 0 ? FFX_UPSCALE_ENABLE_DEPTH_INFINITE : 0u) | FFX_UPSCALE_ENABLE_AUTO_EXPOSURE |
+                 (in.cameraFar <= 0 ? FFX_UPSCALE_ENABLE_DEPTH_INFINITE : 0u) |
+                 (in.exposure ? 0u : FFX_UPSCALE_ENABLE_AUTO_EXPOSURE) |
                  (in.debugView ? FFX_UPSCALE_ENABLE_DEBUG_VISUALIZATION : 0u);
     desc.maxRenderSize = {maxW, maxH};
     desc.maxUpscaleSize = {in.outputWidth, in.outputHeight};
@@ -159,6 +161,7 @@ bool CreateContext(const Inputs& in, Context& c, std::string& error) {
     c.maxRenderW = maxW, c.maxRenderH = maxH, c.outW = in.outputWidth, c.outH = in.outputHeight;
     c.tuning[0] = c.tuning[1] = c.tuning[2] = -99;  // a new context has AMD's defaults
     c.debug = in.debugView;
+    c.autoExposure = !in.exposure;
     c.infinite = in.cameraFar <= 0;
 
     ffxQueryGetProviderVersion pv = {};
@@ -260,7 +263,7 @@ bool Evaluate(ID3D12GraphicsCommandList* list, const Inputs& in, std::string& er
     Context& c = it->second;
     c.lastFrame = g_frame;
     const bool fresh = !c.ctx || in.renderWidth > c.maxRenderW || in.renderHeight > c.maxRenderH || in.debugView != c.debug ||
-                       (in.cameraFar <= 0) != c.infinite;
+                       (in.cameraFar <= 0) != c.infinite || c.autoExposure != !in.exposure;
     if (fresh && !CreateContext(in, c, error)) {
         g_status = error;
         return false;
@@ -276,7 +279,7 @@ bool Evaluate(ID3D12GraphicsCommandList* list, const Inputs& in, std::string& er
     d.color = Res(in.color, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.depth = Res(in.depth, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.motionVectors = Res(in.motion, FFX_API_RESOURCE_STATE_COMPUTE_READ);
-    d.exposure = Res(nullptr, FFX_API_RESOURCE_STATE_COMPUTE_READ);
+    d.exposure = Res(in.exposure, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.reactive = Res(in.reactive, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.transparencyAndComposition = Res(nullptr, FFX_API_RESOURCE_STATE_COMPUTE_READ);
     d.output = Res(in.output, FFX_API_RESOURCE_STATE_UNORDERED_ACCESS);

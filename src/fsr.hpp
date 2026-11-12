@@ -14,6 +14,7 @@ struct Inputs {
     ID3D12Resource* motion = nullptr;    // render resolution, previous minus current in pixels
     ID3D12Resource* output = nullptr;    // output resolution, UAV
     ID3D12Resource* reactive = nullptr;  // optional, render resolution r8: 1 = trust this frame over history
+    ID3D12Resource* exposure = nullptr;  // optional 1x1: the game's exposure (first channel); null: FSR's auto-exposure
     unsigned renderWidth = 0, renderHeight = 0;
     unsigned outputWidth = 0, outputHeight = 0;
     float jitterX = 0, jitterY = 0;  // in render pixels

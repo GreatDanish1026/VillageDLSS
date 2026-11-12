@@ -21,6 +21,14 @@ struct Inputs {
     float jitterX = 0, jitterY = 0;  // in render pixels
     float motionScaleX = 1, motionScaleY = 1;
     bool reset = false;
+    float preExposure = 1;  // the colour was multiplied by this
+    const void* key = nullptr;  // which history (feature) to use; the output texture if null
+    // The game's exposure: a 1x1 texture whose first channel the colour is multiplied by before
+    // tonemapping (non-pixel shader resource state). Null: DLSS's own auto-exposure.
+    ID3D12Resource* exposure = nullptr;
+    // Optional render resolution mask (r8, non-pixel shader resource state): 1 = trust this frame
+    // over the history there (particles, transparencies; DLSS's "bias current colour" mask).
+    ID3D12Resource* biasMask = nullptr;
     int preset = 0;  // NVSDK_NGX_DLSS_Hint_Render_Preset_*
     // Ray Reconstruction (DLSS-D) in place of Super Resolution when rr is set: the colour then holds
     // un-denoised ray-traced lighting, and these guides are needed (render resolution, state
