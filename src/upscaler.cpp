@@ -1353,6 +1353,7 @@ void OnBarrier(command_list* cl, uint32_t count, const resource* res, const reso
 // The exposure DLSS and FSR are told about: the TAA's colour is already exposed (the tonemapper
 // takes it as it is), so 1.0, in a 1x1 r32f texture made once. Without it they estimate an
 // exposure of their own (auto-exposure), which can pump and ghost when the lighting changes.
+std::atomic<float> g_renderScale{1};  // render width / output width at the last TAA (1 when not upscaling)
 resource g_exposureOne = {0};
 
 ID3D12Resource* ExposureOne(device* dev) {
@@ -1400,6 +1401,7 @@ bool OnTaa(command_list* cl, ListState& s) {
     const resource_desc td = dev->get_resource_desc(target);
     uint32_t renderW, renderH;
     RenderSize(dev, color, scene, &renderW, &renderH);
+    g_renderScale = g_outW ? static_cast<float>(renderW) / g_outW : 1.0f;
 
     // Which upscaler: Auto takes DLSS when NGX starts (RTX cards), FSR 3/4 otherwise.
     ID3D12Device* d3d = reinterpret_cast<ID3D12Device*>(dev->get_native());
@@ -1846,8 +1848,85 @@ void OnDestroyDevice(device* dev) {
 // in config.ini) and a change needs a restart. Only material samplers get it: anisotropic or
 // trilinear with wrapping addressing (post-processing uses clamped ones).
 
-float g_mipBias = 0;
+std::atomic<float> g_mipBias{0};  // what new material samplers get now
 std::atomic<uint32_t> g_samplersBiased{0}, g_samplersOther{0};
+
+// Material samplers made so far, by handle (D3D12: the CPU descriptor), with their own bias: when
+// the wanted bias changes they're written again with the new one (games that make their samplers
+// once, at the start). Games that make them every frame get the new bias from OnCreateSampler.
+std::mutex g_samplerMutex;
+std::map<uint64_t, sampler_desc> g_materialSamplers;
+thread_local float t_biasAdded = 0;  // OnCreateSampler -> OnInitSampler on the same thread
+float g_biasWritten = 0;             // the bias the recorded samplers have
+
+bool IsMaterialSampler(const sampler_desc& d) {
+    return (d.filter == filter_mode::anisotropic || d.filter == filter_mode::min_mag_mip_linear) &&
+           d.address_u == texture_address_mode::wrap && d.max_lod > d.min_lod;
+}
+
+// The bias wanted now: log2 of the render scale while upscaling (DLSS's guidance), else none.
+float WantedMipBias() {
+    if (!g_set.enabled || !g_set.upscale || !g_set.textureDetail) return 0;
+    const float scale = g_renderScale.load();
+    return scale < 0.99f && scale > 0.2f ? std::log2(scale) : 0.0f;
+}
+
+bool OnCreateSampler(device*, sampler_desc& d) {
+    t_biasAdded = 0;
+    const float bias = g_mipBias.load();
+    if (!IsMaterialSampler(d)) {
+        ++g_samplersOther;
+        return false;
+    }
+    ++g_samplersBiased;
+    if (bias == 0) return false;
+    d.mip_lod_bias += bias;
+    t_biasAdded = bias;
+    return true;
+}
+
+void OnInitSampler(device*, const sampler_desc& d, sampler s) {
+    std::lock_guard<std::mutex> lock(g_samplerMutex);
+    if (!IsMaterialSampler(d)) {
+        g_materialSamplers.erase(s.handle);  // a slot used for something else now
+        return;
+    }
+    sampler_desc base = d;
+    base.mip_lod_bias -= t_biasAdded;  // the game's own
+    g_materialSamplers[s.handle] = base;
+    t_biasAdded = 0;
+}
+
+void OnDestroySampler(device*, sampler s) {
+    std::lock_guard<std::mutex> lock(g_samplerMutex);
+    g_materialSamplers.erase(s.handle);
+}
+
+// Once a frame: a changed bias goes to new samplers and is written into the recorded ones.
+void UpdateMipBias(device* dev) {
+    const float want = WantedMipBias();
+    if (std::fabs(want - g_mipBias.load()) < 0.05f) return;
+    g_mipBias = want;
+    ID3D12Device* d3d = reinterpret_cast<ID3D12Device*>(dev->get_native());
+    std::lock_guard<std::mutex> lock(g_samplerMutex);
+    for (const auto& [handle, d] : g_materialSamplers) {
+        D3D12_SAMPLER_DESC n = {};
+        n.Filter = static_cast<D3D12_FILTER>(d.filter);  // ReShade's values are D3D12's
+        n.AddressU = static_cast<D3D12_TEXTURE_ADDRESS_MODE>(d.address_u);
+        n.AddressV = static_cast<D3D12_TEXTURE_ADDRESS_MODE>(d.address_v);
+        n.AddressW = static_cast<D3D12_TEXTURE_ADDRESS_MODE>(d.address_w);
+        n.MipLODBias = d.mip_lod_bias + want;
+        n.MaxAnisotropy = static_cast<UINT>(d.max_anisotropy);
+        n.ComparisonFunc = static_cast<D3D12_COMPARISON_FUNC>(static_cast<uint32_t>(d.compare_op) + 1);
+        for (int i = 0; i < 4; ++i) n.BorderColor[i] = d.border_color[i];
+        n.MinLOD = d.min_lod;
+        n.MaxLOD = d.max_lod;
+        d3d->CreateSampler(&n, D3D12_CPU_DESCRIPTOR_HANDLE{static_cast<SIZE_T>(handle)});
+    }
+    g_biasWritten = want;
+    Log("texture mip bias now %.2f (render scale %.2f): %zu recorded samplers rewritten", want, g_renderScale.load(),
+        g_materialSamplers.size());
+}
 
 float StartupRenderScale() {
     FILE* f = _wfopen((ExeDir() + L"config.ini").c_str(), L"r");
@@ -1860,17 +1939,6 @@ float StartupRenderScale() {
     return scale > 0.2f && scale < 4 ? scale : 1;
 }
 
-bool OnCreateSampler(device*, sampler_desc& d) {
-    const bool material = (d.filter == filter_mode::anisotropic || d.filter == filter_mode::min_mag_mip_linear) &&
-                          d.address_u == texture_address_mode::wrap && d.max_lod > d.min_lod;
-    if (!material || g_mipBias == 0) {
-        ++g_samplersOther;
-        return false;
-    }
-    d.mip_lod_bias += g_mipBias;
-    ++g_samplersBiased;
-    return true;
-}
 
 // ---------------------------------------------------------------- DLSS mode -> render scale
 //
@@ -2005,6 +2073,7 @@ bool UpscalerOnDraw(command_list* cl, uint32_t vertices, uint32_t instances) {
 }
 
 void UpscalerPresent(swapchain* sc) {
+    UpdateMipBias(sc->get_device());
     WriteWantedRt();
     dlss::EndFrame();
     fsr::EndFrame();
@@ -2045,7 +2114,7 @@ void UpscalerPresent(swapchain* sc) {
     WriteWantedScale();
     if (!g_samplerStatsLogged && g_frame > 600) {
         g_samplerStatsLogged = true;
-        Log("samplers: %u material ones biased by %.2f, %u others", g_samplersBiased.load(), g_mipBias, g_samplersOther.load());
+        Log("samplers: %u material ones biased by %.2f, %u others", g_samplersBiased.load(), g_mipBias.load(), g_samplersOther.load());
     }
 }
 
@@ -2205,7 +2274,7 @@ void UpscalerOverlay() {
         ImGui::SeparatorText("Upscaling");
         ImGui::TextDisabled("DLSS: %s", dlss::Status().c_str());
         ImGui::TextDisabled("FSR: %s", fsr::Status().c_str());
-        ImGui::TextDisabled("Texture mip bias: %.2f (%u samplers)", g_mipBias, g_samplersBiased.load());
+        ImGui::TextDisabled("Texture mip bias: %.2f (%u samplers)", g_mipBias.load(), g_samplersBiased.load());
         std::string err;
         {
             std::lock_guard<std::mutex> lock(g_statusMutex);
@@ -2244,8 +2313,8 @@ void UpscalerOverlay() {
             ImGui::TextDisabled("Reflections now: %s", now == 0 ? "full resolution" : now == 1 ? "half resolution" : "unknown (is REFramework running?)");
         }
         changed |= ImGui::Checkbox("Sharper textures at lower render resolutions", &g_set.textureDetail);
-        Help("A mip bias of log2(render scale) on the game's material textures, as NVIDIA recommends. Set when "
-             "the game starts: restart after changing the render resolution.");
+        Help("A mip bias of log2(render scale) on the game's material textures, as NVIDIA recommends. It follows "
+             "the render resolution as it changes, without a restart.");
         changed |= ImGui::Checkbox("Flip jitter X", &g_set.flipJitterX);
         ImGui::SameLine();
         changed |= ImGui::Checkbox("Flip jitter Y", &g_set.flipJitterY);
@@ -2291,6 +2360,8 @@ void UpscalerInit() {
     reshade::register_event<reshade::addon_event::bind_scissor_rects>(&OnBindScissors);
     reshade::register_event<reshade::addon_event::destroy_device>(&OnDestroyDevice);
     reshade::register_event<reshade::addon_event::create_sampler>(&OnCreateSampler);
+    reshade::register_event<reshade::addon_event::init_sampler>(&OnInitSampler);
+    reshade::register_event<reshade::addon_event::destroy_sampler>(&OnDestroySampler);
     reshade::register_event<reshade::addon_event::barrier>(&OnBarrier);
     reshade::register_event<reshade::addon_event::destroy_resource>(&RtOnDestroyResource);
     reshade::register_event<reshade::addon_event::copy_buffer_region>(&CbOnCopyBuffer);
@@ -2298,8 +2369,9 @@ void UpscalerInit() {
     reshade::register_event<reshade::addon_event::destroy_resource>(&CbOnDestroyResource);
     RegisterFrameGen();
     const float scale = g_set.enabled && g_set.mode > 0 ? kModes[g_set.mode].scale : StartupRenderScale();
+    g_renderScale = scale;
     if (g_set.enabled && g_set.upscale && g_set.textureDetail && scale < 0.99f) g_mipBias = std::log2(scale);
-    Log("texture mip bias %.2f (Image Quality %.2f at start)", g_mipBias, scale);
+    Log("texture mip bias %.2f (Image Quality %.2f at start; follows the render scale from now on)", g_mipBias.load(), scale);
     Log("Upscaling %s at start (F9 toggles), upscaler setting %d (0 auto, 1 DLSS, 2 FSR), upscaling below 100%% %s",
         g_set.enabled ? "on" : "off", g_set.upscaler, g_set.upscale ? "on" : "off");
 }
@@ -2317,6 +2389,8 @@ void UpscalerShutdown() {
     reshade::unregister_event<reshade::addon_event::bind_scissor_rects>(&OnBindScissors);
     reshade::unregister_event<reshade::addon_event::destroy_device>(&OnDestroyDevice);
     reshade::unregister_event<reshade::addon_event::create_sampler>(&OnCreateSampler);
+    reshade::unregister_event<reshade::addon_event::init_sampler>(&OnInitSampler);
+    reshade::unregister_event<reshade::addon_event::destroy_sampler>(&OnDestroySampler);
     reshade::unregister_event<reshade::addon_event::barrier>(&OnBarrier);
     reshade::unregister_event<reshade::addon_event::destroy_resource>(&RtOnDestroyResource);
     reshade::unregister_event<reshade::addon_event::copy_buffer_region>(&CbOnCopyBuffer);
