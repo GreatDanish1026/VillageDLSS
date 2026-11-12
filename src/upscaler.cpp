@@ -123,7 +123,7 @@ struct Settings {
     bool effectMask = true;     // DLSS/FSR get the TAA's effect mask (games that have one)
     int mode = 0;          // DLSS mode setting the render scale through VillageDLSS.lua (0: the game's slider)
     // DLSS Ray Reconstruction in place of Super Resolution while the game ray traces (ini
-    // RayReconstruction; experimental, off by default). rrPreset: NVSDK_NGX_RayReconstruction_Hint_Render_Preset_*
+    // RayReconstruction; off by default). rrPreset: NVSDK_NGX_RayReconstruction_Hint_Render_Preset_*
     // (ini RrModel, 0 = NVIDIA's default). rrDenoise (ini RrDenoise): which of the game's ray tracing
     // denoise passes are skipped: 0 none, 1 all but the spatial ones (they fill the sparse rays), 2 all.
     // guideView: debug view of one guide (not saved).
@@ -2329,14 +2329,14 @@ void UpscalerOverlay() {
         ImGui::SeparatorText("Ray tracing");
         {
             ImGui::BeginDisabled(ResolvedTech() == Tech::Fsr);
-            if (ImGui::Checkbox("Ray Reconstruction (experimental)", &g_set.rr)) {
+            if (ImGui::Checkbox("Ray Reconstruction", &g_set.rr)) {
                 changed = true;
                 Log("Ray Reconstruction setting: %s", g_set.rr ? "on" : "off");
             }
             Help("NVIDIA's DLSS Ray Reconstruction in place of DLSS Super Resolution while the game ray traces:\n"
                  "it upscales and cleans up what's left of the noise in the ray-traced reflections and lighting,\n"
                  "on top of the game's own ray tracing denoiser. Needs the game's ray tracing on (Super Resolution\n"
-                 "otherwise). Experimental. The Advanced tab can skip parts of the game's denoiser for testing; the\n"
+                 "otherwise). The Advanced tab can skip parts of the game's denoiser for testing; the\n"
                  "game traces at half resolution, which Ray Reconstruction isn't made for, so that looked worse.");
             if (g_set.rr) {
                 static const char* const kRrNames[] = {"NVIDIA's default", "D (transformer)", "E (latest transformer)",

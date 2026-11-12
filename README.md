@@ -2,7 +2,7 @@
 
 ReShade add-on for **Resident Evil Village** (DirectX 12) that replaces the game's TAA
 with **NVIDIA DLSS** or **AMD FSR 3.1 / FSR 4**, and adds **DLSS or FSR frame generation** and
-experimental **DLSS Ray Reconstruction** for the ray-traced lighting and reflections. The game
+**DLSS Ray Reconstruction** for the ray-traced lighting and reflections. The game
 only has FSR 1 (a spatial upscaler); this gives it native anti-aliasing (DLAA) and upscaling from
 Quality to Performance, with the game's bloom, tonemapping (and RenoDX HDR) and sharpening on top of the upscaled
 image.
@@ -41,7 +41,7 @@ support, and REFramework for the render resolution dropdown.
   sharper reflections, especially with Ray Reconstruction, at a GPU cost. (Resident Evil Village may ignore this setting.)
 - **Sharpening** (Settings tab, off by default): extra contrast-adaptive sharpening of the upscaled
   image (AMD's RCAS): after DLSS and Ray Reconstruction, or FSR's own for FSR.
-- **Ray Reconstruction** (experimental, DLSS only, off by default): with the game's ray tracing on,
+- **Ray Reconstruction** (DLSS only, off by default): with the game's ray tracing on,
   NVIDIA's DLSS Ray Reconstruction 310.9.16 replaces DLSS Super Resolution. It upscales and cleans up
   the remaining noise in the ray-traced lighting and reflections, on top of the game's own ray
   tracing denoiser (built from the game's G-buffer and camera). **Ray Reconstruction model**:
