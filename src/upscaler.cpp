@@ -2320,6 +2320,14 @@ void UpscalerOverlay() {
                  "second-generation transformer) cost more, especially on RTX 20 and 30 cards. NVIDIA's "
                  "default leaves it to the driver. A DLSS override set in the NVIDIA App takes "
                  "precedence.\n\nOnly used when DLSS upscales (greyed out while FSR does).");
+        }
+        ImGui::SetNextItemWidth(ControlWidth());
+        if (ImGui::SliderFloat("Sharpening", &g_set.sharpness, 0.0f, 1.0f, g_set.sharpness < 0.005f ? "Off" : "%.2f"))
+            changed = true;
+        Help("Extra sharpening of the upscaled image (AMD's RCAS, contrast-adaptive: crisper edges without "
+             "halos). 0 = off. For DLSS and Ray Reconstruction it runs after them; for FSR it's FSR's own.");
+        ImGui::SeparatorText("Ray tracing");
+        {
             ImGui::BeginDisabled(ResolvedTech() == Tech::Fsr);
             if (ImGui::Checkbox("Ray Reconstruction (experimental)", &g_set.rr)) {
                 changed = true;
@@ -2352,12 +2360,15 @@ void UpscalerOverlay() {
             }
             ImGui::EndDisabled();
         }
-        ImGui::SetNextItemWidth(ControlWidth());
-        if (ImGui::SliderFloat("Sharpening", &g_set.sharpness, 0.0f, 1.0f, g_set.sharpness < 0.005f ? "Off" : "%.2f"))
-            changed = true;
-        Help("Extra sharpening of the upscaled image (AMD's RCAS, contrast-adaptive: crisper edges without "
-             "halos). 0 = off. For DLSS and Ray Reconstruction it runs after them; for FSR it's FSR's own.");
         ImGui::EndDisabled();
+        changed |= ImGui::Checkbox("Full-resolution reflections", &g_set.fullResReflections);
+        Help("Ray traces reflections at the full render resolution instead of the game's reduced one: sharper "
+             "reflections, especially with Ray Reconstruction, at a GPU cost. Needs REFramework (the bundled "
+             "VillageDLSS.lua sets it) and the game's ray tracing on.");
+        if (g_set.fullResReflections) {
+            const int now = RtResolutionNow();
+            ImGui::TextDisabled("Reflections now: %s", now == 0 ? "full resolution" : now == 1 ? "half resolution" : "unknown (is REFramework running?)");
+        }
         DrawFrameGenSettings();
         ImGui::EndTabItem();
     }
@@ -2383,7 +2394,7 @@ void UpscalerOverlay() {
         ImGui::EndTabItem();
     }
     if (ImGui::BeginTabItem("Advanced")) {
-        ImGui::SeparatorText("Upscaling");
+        ImGui::SeparatorText("Image quality");
         changed |= ImGui::Checkbox("Upscale below 100% render resolution", &g_set.upscale);
         Help("On: below 100%, DLSS/FSR upscale to the screen and the game's post-processing runs at full "
              "resolution. Off: DLSS/FSR anti-alias at the render size and the game stretches the picture.");
@@ -2395,22 +2406,10 @@ void UpscalerOverlay() {
         changed |= ImGui::Checkbox("Use the game's exposure", &g_set.gameExposure);
         Help("Tells DLSS and FSR the picture's real exposure instead of letting them estimate it: steadier "
              "brightness and less ghosting when the lighting changes.");
-        changed |= ImGui::Checkbox("Full-resolution reflections", &g_set.fullResReflections);
-        Help("Ray traces reflections at the full render resolution instead of the game's reduced one: sharper "
-             "reflections, especially with Ray Reconstruction, at a GPU cost. Needs REFramework (the bundled "
-             "VillageDLSS.lua sets it) and the game's ray tracing on.");
-        if (g_set.fullResReflections) {
-            const int now = RtResolutionNow();
-            ImGui::TextDisabled("Reflections now: %s", now == 0 ? "full resolution" : now == 1 ? "half resolution" : "unknown (is REFramework running?)");
-        }
         changed |= ImGui::Checkbox("Sharper textures at lower render resolutions", &g_set.textureDetail);
         Help("A mip bias of log2(render scale) on the game's material textures, as NVIDIA recommends. It follows "
              "the render resolution as it changes, without a restart.");
-        changed |= ImGui::Checkbox("Flip jitter X", &g_set.flipJitterX);
-        ImGui::SameLine();
-        changed |= ImGui::Checkbox("Flip jitter Y", &g_set.flipJitterY);
-        Help("Testing only: the sign of the camera jitter given to DLSS and FSR. Leave both off.");
-        ImGui::SeparatorText("Ray Reconstruction");
+        ImGui::SeparatorText("Ray Reconstruction testing");
         ImGui::SetNextItemWidth(ControlWidth() * 1.4f);
         if (ImGui::Combo("Game's ray tracing denoiser", &g_set.rrDenoise, kRrDenoiseNames, 3)) {
             changed = true;
@@ -2430,6 +2429,10 @@ void UpscalerOverlay() {
              "surface colour, reflectivity, normals or roughness. For checking; off at each launch.");
         DrawFrameGenAdvanced();
         ImGui::SeparatorText("Development");
+        changed |= ImGui::Checkbox("Flip jitter X", &g_set.flipJitterX);
+        ImGui::SameLine();
+        changed |= ImGui::Checkbox("Flip jitter Y", &g_set.flipJitterY);
+        Help("Testing only: the sign of the camera jitter given to DLSS and FSR. Leave both off.");
         DrawCaptureTool();
         ImGui::EndTabItem();
     }

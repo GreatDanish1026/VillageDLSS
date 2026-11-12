@@ -36,7 +36,7 @@ support, and REFramework for the render resolution dropdown.
 - **DLSS model**: Automatic (default: K, M at Performance, L at Ultra Performance, as NVIDIA recommends), or K, J, L or M (DLSS 4.5) at every resolution, or NVIDIA's default.
 - **Game exposure** (on by default, Advanced tab): DLSS and FSR get the picture's real exposure (the game's colour is already exposed) instead of
   estimating it themselves: steadier brightness and less ghosting when the lighting changes.
-- **Full-resolution reflections** (off by default, Advanced tab): the bundled REFramework script
+- **Full-resolution reflections** (off by default, Settings tab): the bundled REFramework script
   makes the game ray trace its reflections at the full render resolution instead of a reduced one:
   sharper reflections, especially with Ray Reconstruction, at a GPU cost. (Resident Evil Village may ignore this setting.)
 - **Sharpening** (Settings tab, off by default): extra contrast-adaptive sharpening of the upscaled
