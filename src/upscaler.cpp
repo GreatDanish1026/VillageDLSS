@@ -2405,7 +2405,7 @@ void UpscalerOverlay() {
         }
         changed |= ImGui::Checkbox("Use the game's exposure", &g_set.gameExposure);
         Help("Tells DLSS and FSR the picture's real exposure instead of letting them estimate it: steadier "
-             "brightness and less ghosting when the lighting changes.");
+             "brightness and less ghosting when the lighting changes. DLSS and FSR 3.1 only: FSR 4 measures its own.");
         changed |= ImGui::Checkbox("Sharper textures at lower render resolutions", &g_set.textureDetail);
         Help("A mip bias of log2(render scale) on the game's material textures, as NVIDIA recommends. It follows "
              "the render resolution as it changes, without a restart.");

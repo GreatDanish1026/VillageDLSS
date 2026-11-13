@@ -17,6 +17,7 @@
 #include <ffx_upscale.h>
 
 #include <cstdio>
+#include <cstring>
 #include <map>
 #include <mutex>
 #include <vector>
@@ -30,6 +31,10 @@ HMODULE g_module = nullptr;
 ffxFunctions g_ffx = {};
 bool g_initTried = false, g_ready = false;
 std::string g_initError, g_status = "not started", g_version;
+// The runtime's default upscaler (the newest offered) is FSR 4. FSR 4 isn't given the game's
+// exposure texture (FSR 2's 1x1 rg32f): a Radeon user's game crashed in FSR 4's first dispatch
+// with it (1.4.0); FSR 4 measures exposure itself.
+bool g_fsr4 = false;
 
 // One context (and so one history) per output size, like the DLSS features.
 struct Context {
@@ -230,14 +235,18 @@ bool Init(ID3D12Device* device, std::string& error) {
     }
     std::string list;
     for (uint64_t i = 0; i < count && i < 8; ++i) list += std::string(i ? ", " : "") + (names[i] ? names[i] : "?");
-    rd::Log("FSR runtime loaded, upscalers offered: %s", list.c_str());
+    g_fsr4 = names[0] && (names[0][0] == '4' || strncmp(names[0], "FSR 4", 5) == 0);
+    rd::Log("FSR runtime loaded, upscalers offered: %s%s", list.c_str(),
+            g_fsr4 ? " (FSR 4: measures exposure itself, the game's isn't given)" : "");
     g_ready = true;
     g_status = "ready";
     return true;
 }
 
-bool Evaluate(ID3D12GraphicsCommandList* list, const Inputs& in, std::string& error) {
+bool Evaluate(ID3D12GraphicsCommandList* list, const Inputs& given, std::string& error) {
     std::lock_guard<std::mutex> lock(g_mutex);
+    Inputs in = given;
+    if (g_fsr4) in.exposure = nullptr;
     if (!g_ready) {
         error = g_initError.empty() ? "FSR not started" : g_initError;
         return false;
@@ -297,7 +306,15 @@ bool Evaluate(ID3D12GraphicsCommandList* list, const Inputs& in, std::string& er
     d.cameraFovAngleVertical = in.cameraFovY;
     d.viewSpaceToMetersFactor = in.metersPerUnit;
     d.flags = in.debugView ? FFX_UPSCALE_FLAG_DRAW_DEBUG_VIEW : 0u;
+    // The first dispatches are logged before and after, so a crash inside FSR shows in the log.
+    static int traced = 0;
+    const bool trace = traced < 2;
+    if (trace)
+        rd::Log("FSR dispatch %d: %ux%u -> %ux%u, exposure %s, reactive %s, reset %d", traced + 1, in.renderWidth,
+                in.renderHeight, in.outputWidth, in.outputHeight, in.exposure ? "game's" : "auto",
+                in.reactive ? "yes" : "no", d.reset ? 1 : 0);
     const ffxReturnCode_t r = g_ffx.Dispatch(&c.ctx, &d.header);
+    if (trace) rd::Log("FSR dispatch %d returned: %s", ++traced, Code(r).c_str());
     if (r != FFX_API_RETURN_OK) {
         error = "FSR dispatch failed (" + Code(r) + ")";
         g_status = error;

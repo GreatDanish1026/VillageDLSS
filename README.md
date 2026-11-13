@@ -1,4 +1,4 @@
-# VillageDLSS 1.3.0
+# VillageDLSS 1.3.1
 
 ReShade add-on for **Resident Evil Village** (DirectX 12) that replaces the game's TAA
 with **NVIDIA DLSS** or **AMD FSR 3.1 / FSR 4**, and adds **DLSS or FSR frame generation** and
@@ -34,8 +34,9 @@ support, and REFramework for the render resolution dropdown.
 - **Sharper textures at lower render sizes** (on by default): a mip bias of log2(render scale) on
   the game's material textures, as NVIDIA recommends. It follows the render resolution as it changes, without a restart.
 - **DLSS model**: Automatic (default: K, M at Performance, L at Ultra Performance, as NVIDIA recommends), or K, J, L or M (DLSS 4.5) at every resolution, or NVIDIA's default.
-- **Game exposure** (on by default, Advanced tab): DLSS and FSR get the picture's real exposure (the game's colour is already exposed) instead of
-  estimating it themselves: steadier brightness and less ghosting when the lighting changes.
+- **Game exposure** (on by default, Advanced tab): DLSS and FSR 3.1 get the picture's real exposure (the game's colour is already exposed) instead of
+  estimating it themselves: steadier brightness and less ghosting when the lighting changes. FSR 4 measures its own
+  (1.3.0 gave it the game's too, which crashed games on Radeon cards).
 - **Full-resolution reflections** (off by default, Settings tab): the bundled REFramework script
   makes the game ray trace its reflections at the full render resolution instead of a reduced one:
   sharper reflections, especially with Ray Reconstruction, at a GPU cost. (Resident Evil Village may ignore this setting.)
@@ -57,7 +58,7 @@ Settings, Status and Advanced tabs. They're saved in `ReShade.ini` under `[Villa
 
 ## Install
 
-**With Fluffy Mod Manager**: put `VillageDLSS-1.3.0.zip` in Fluffy Mod Manager's `Games\RE8\Mods`
+**With Fluffy Mod Manager**: put `VillageDLSS-1.3.1.zip` in Fluffy Mod Manager's `Games\RE8\Mods`
 folder (or drag it onto the manager) and enable it. It installs into the game folder:
 
 - `VillageDLSS.addon64` (the add-on), `nvngx_dlss.dll` and `nvngx_dlssd.dll` (NVIDIA's DLSS and
