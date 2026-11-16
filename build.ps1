@@ -114,7 +114,7 @@ if ($Package) {
         "name=VillageDLSS - DLSS, FSR 3/4 and frame generation for Resident Evil Village",
         "version=v$version",
         "description=Replaces the game's TAA with NVIDIA DLSS or AMD FSR 3.1 / FSR 4: native anti-aliasing (DLAA), or upscaling with the game's bloom, tonemapping (RenoDX HDR works), sharpening and HUD on top at full resolution; adds DLSS or FSR frame generation, and experimental DLSS Ray Reconstruction for the ray-traced lighting and reflections. DLSS needs an NVIDIA RTX card (frame generation RTX 40/50); FSR runs on any DirectX 12 GPU. Needs ReShade 6.8+ with add-on support, and REFramework for the render resolution dropdown. Settings: ReShade overlay (Home), Add-ons tab, VillageDLSS; F9 switches upscaling on and off.",
-        "author=Scott Dinwiddie"
+        "author=GreatDanish"
     ) | Set-Content "$mod\modinfo.ini" -Encoding ascii
 
     # Zip with forward-slash entry names (Compress-Archive in PowerShell 5.1 writes backslashes,
