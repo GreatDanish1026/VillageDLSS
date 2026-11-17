@@ -128,10 +128,12 @@ struct Settings {
     // RayReconstruction; off by default). rrPreset: NVSDK_NGX_RayReconstruction_Hint_Render_Preset_*
     // (ini RrModel, 0 = NVIDIA's default). rrDenoise (ini RrDenoise): which of the game's ray tracing
     // denoise passes are skipped: 0 none, 1 all but the spatial ones (they fill the sparse rays), 2 all.
+    // Default 1 since 2026-11-17: with the motion vectors fixed it looked best (user, RE2); the ini key
+    // changed from RrDenoise so everyone moves to it once.
     // guideView: debug view of one guide (not saved).
     bool rr = false;
     int rrPreset = 0;
-    int rrDenoise = 0;
+    int rrDenoise = 1;
     int guideView = 0;
     // From the DX11 versions (RE3DLSS-DX11): the game's velocity includes this frame's jitter (its
     // FillVelocityPS uses the jittered viewProjInvMat; confirmed in RE2's DX12 build 2026-11-17).
@@ -169,8 +171,8 @@ void LoadSettings() {
     reshade::get_config_value(nullptr, RD_PRODUCT, "RayReconstruction", g_set.rr);
     reshade::get_config_value(nullptr, RD_PRODUCT, "RrModel", g_set.rrPreset);
     if (g_set.rrPreset != 0 && (g_set.rrPreset < 4 || g_set.rrPreset > 6)) g_set.rrPreset = 0;
-    reshade::get_config_value(nullptr, RD_PRODUCT, "RrDenoise", g_set.rrDenoise);
-    if (g_set.rrDenoise < 0 || g_set.rrDenoise > 2) g_set.rrDenoise = 0;
+    reshade::get_config_value(nullptr, RD_PRODUCT, "RrDenoiseMode", g_set.rrDenoise);
+    if (g_set.rrDenoise < 0 || g_set.rrDenoise > 2) g_set.rrDenoise = 1;
     reshade::get_config_value(nullptr, RD_PRODUCT, "MotionFix", g_set.mvFix);
     reshade::get_config_value(nullptr, RD_PRODUCT, "FgMotionFix", g_set.fgMvFix);
 }
@@ -191,7 +193,7 @@ void SaveSettings() {
     reshade::set_config_value(nullptr, RD_PRODUCT, "Mode", g_set.mode);
     reshade::set_config_value(nullptr, RD_PRODUCT, "RayReconstruction", g_set.rr);
     reshade::set_config_value(nullptr, RD_PRODUCT, "RrModel", g_set.rrPreset);
-    reshade::set_config_value(nullptr, RD_PRODUCT, "RrDenoise", g_set.rrDenoise);
+    reshade::set_config_value(nullptr, RD_PRODUCT, "RrDenoiseMode", g_set.rrDenoise);
     reshade::set_config_value(nullptr, RD_PRODUCT, "MotionFix", g_set.mvFix);
     reshade::set_config_value(nullptr, RD_PRODUCT, "FgMotionFix", g_set.fgMvFix);
 }
@@ -758,8 +760,8 @@ constexpr uint32_t kRtUpscale = 0x4206d838;           // rayTracingUpscale: t2 b
 constexpr uint32_t kUpBase = 2, kUpNormal = 3, kUpSignal = 5;  // t5 shY, t6 cocg, t7 specular
 constexpr uint32_t kRtSignals = 3;
 
-const char* const kRrDenoiseNames[] = {"Game's denoiser, Ray Reconstruction on top (recommended)",
-                                       "Skip all but the spatial passes (experimental)", "Skip all: raw rays (experimental)"};
+const char* const kRrDenoiseNames[] = {"Game's denoiser, Ray Reconstruction on top",
+                                       "Skip all but the spatial passes (recommended)", "Skip all: raw rays (experimental)"};
 const char* const kGuideViewNames[] = {"Off", "Diffuse albedo", "Specular albedo", "Normals", "Roughness"};
 constexpr int kGuideViewCount = 5;
 
@@ -2576,12 +2578,12 @@ void UpscalerOverlay() {
             Log("Ray Reconstruction denoising setting: %s", kRrDenoiseNames[g_set.rrDenoise]);
         }
         Help("While Ray Reconstruction runs, which of the game's own ray tracing denoise passes still run.\n"
-             "Game's denoiser (recommended, looked best in testing): everything stays; Ray Reconstruction\n"
-             "upscales and cleans up the result. Skip all but the spatial passes: the game's frame-to-frame\n"
-             "(temporal) filtering, variance and deflicker are skipped; its spatial passes still fill in the\n"
-             "sparse rays (global illumination is traced with a quarter of the rays). Skip all: Ray\n"
-             "Reconstruction gets the raw rays. The game traces at half resolution, so the skipping choices\n"
-             "come out blotchier.");
+             "Skip all but the spatial passes (recommended, looked best in testing): the game's frame-to-frame\n"
+             "(temporal) filtering, variance and deflicker are skipped, so Ray Reconstruction does the\n"
+             "denoising over time; the game's spatial passes still fill in the sparse rays (global\n"
+             "illumination is traced with a quarter of the rays). Game's denoiser: everything stays and Ray\n"
+             "Reconstruction cleans up the result. Skip all: Ray Reconstruction gets the raw rays (blotchier:\n"
+             "the game traces at half resolution).");
         ImGui::SetNextItemWidth(ControlWidth());
         if (ImGui::Combo("Show guide", &g_set.guideView, kGuideViewNames, kGuideViewCount))
             Log("diagnosis: show guide %s", kGuideViewNames[g_set.guideView]);
