@@ -138,6 +138,7 @@ struct Settings {
     // (A longer jitter sequence, patched into SceneInfo when bound, shimmered and flickered in RE2's
     // DX12 build with ray tracing on: dropped 2026-11-17, see docs/FINDINGS.md.)
     bool mvFix = true;       // ini MotionFix: the jitter taken out of the motion vectors (mvfix.hlsl)
+    bool fgMvFix = true;     // ini FgMotionFix: frame generation gets those motion vectors too
 } g_set;
 
 struct Mode {
@@ -171,6 +172,7 @@ void LoadSettings() {
     reshade::get_config_value(nullptr, RD_PRODUCT, "RrDenoise", g_set.rrDenoise);
     if (g_set.rrDenoise < 0 || g_set.rrDenoise > 2) g_set.rrDenoise = 0;
     reshade::get_config_value(nullptr, RD_PRODUCT, "MotionFix", g_set.mvFix);
+    reshade::get_config_value(nullptr, RD_PRODUCT, "FgMotionFix", g_set.fgMvFix);
 }
 
 void SaveSettings() {
@@ -191,6 +193,7 @@ void SaveSettings() {
     reshade::set_config_value(nullptr, RD_PRODUCT, "RrModel", g_set.rrPreset);
     reshade::set_config_value(nullptr, RD_PRODUCT, "RrDenoise", g_set.rrDenoise);
     reshade::set_config_value(nullptr, RD_PRODUCT, "MotionFix", g_set.mvFix);
+    reshade::set_config_value(nullptr, RD_PRODUCT, "FgMotionFix", g_set.fgMvFix);
 }
 
 std::mutex g_statusMutex;
@@ -1239,9 +1242,97 @@ void RenderSize(device* dev, resource color, const float* scene, uint32_t* w, ui
 float JitterX(const float* scene, uint32_t w) { return -scene[kProjElement0 + 2] * w * 0.5f * (g_set.flipJitterX ? -1 : 1); }
 float JitterY(const float* scene, uint32_t h) { return scene[kProjElement0 + 3] * h * 0.5f * (g_set.flipJitterY ? -1 : 1); }
 
+// ---------------------------------------------------------------- motion vectors without the jitter
+//
+// The game's velocity (rgba16snorm, NDC offset to the previous position, y up) includes this
+// frame's jitter. mvfix.hlsl writes g_mv (rg16f, render pixels) = velocity * (0.5 w, -0.5 h) +
+// jitter, which DLSS, Ray Reconstruction and FSR get with a motion scale of 1. In RE3DLSS-DX11 the
+// jitter left soft striped patches on still faces at Performance. g_resMutex held.
+Texture g_mv;
+uint64_t g_mvFrame = ~0ull;  // g_frame when FixMotion last made g_mv
+resource_view g_mvUav = {0};
+uint64_t g_mvUavOf = 0;
+resource_view g_velSrv = {0};  // our view of the game's velocity texture
+uint64_t g_velSrvOf = 0;
+pipeline_layout g_mvLayout = {0};
+pipeline g_mvPipe = {0};
+bool g_mvFailed = false;
+
+bool MvFixReady(device* dev) {
+    if (g_mvPipe.handle) return true;
+    if (g_mvFailed) return false;
+    constant_range c = {};
+    c.count = 8;
+    c.visibility = shader_stage::all_compute;
+    descriptor_range srv = {};
+    srv.count = 1;
+    srv.visibility = shader_stage::all_compute;
+    srv.type = descriptor_type::shader_resource_view;
+    descriptor_range uav = srv;
+    uav.type = descriptor_type::unordered_access_view;
+    const pipeline_layout_param params[3] = {pipeline_layout_param(c), pipeline_layout_param(srv), pipeline_layout_param(uav)};
+    shader_desc cs = {};
+    cs.code = kMvFixCs;
+    cs.code_size = sizeof(kMvFixCs);
+    pipeline_subobject sub = {pipeline_subobject_type::compute_shader, 1, &cs};
+    if (!dev->create_pipeline_layout(3, params, &g_mvLayout) || !dev->create_pipeline(g_mvLayout, 1, &sub, &g_mvPipe)) {
+        g_mvFailed = true;
+        g_mvPipe = {0};
+        Log("couldn't create the motion vector shader: the game's motion vectors are used as they are");
+        return false;
+    }
+    return true;
+}
+
+// The game's velocity -> g_mv. False: use the game's velocity as it is.
+bool FixMotion(command_list* cl, device* dev, resource velocity, uint32_t w, uint32_t h, float jitterPxX, float jitterPxY) {
+    if (!MvFixReady(dev)) return false;
+    const resource_usage usage = resource_usage::unordered_access | resource_usage::shader_resource;
+    if (!Ensure(dev, g_mv, w, h, format::r16g16_float, usage, resource_usage::unordered_access, "motion vector")) return false;
+    if (g_mvUavOf != g_mv.res.handle) {
+        if (g_mvUav.handle) dev->destroy_resource_view(g_mvUav);
+        g_mvUav = {0};
+        dev->create_resource_view(g_mv.res, resource_usage::unordered_access, resource_view_desc(format::r16g16_float), &g_mvUav);
+        g_mvUavOf = g_mv.res.handle;
+    }
+    if (g_velSrvOf != velocity.handle) {
+        if (g_velSrv.handle) dev->destroy_resource_view(g_velSrv);
+        g_velSrv = {0};
+        const format vf = format_to_default_typed(dev->get_resource_desc(velocity).texture.format);
+        dev->create_resource_view(velocity, resource_usage::shader_resource,
+                                  resource_view_desc(resource_view_type::texture_2d, vf, 0, 1, 0, 1), &g_velSrv);
+        g_velSrvOf = velocity.handle;
+    }
+    if (!g_mvUav.handle || !g_velSrv.handle) return false;
+    Transition(cl, g_mv, resource_usage::unordered_access);
+    struct {
+        float scaleX, scaleY, offsetX, offsetY;
+        uint32_t w, h, pad0, pad1;
+    } p = {0.5f * w, -0.5f * h, jitterPxX, jitterPxY, w, h, 0, 0};
+    cl->bind_pipeline(pipeline_stage::all_compute, g_mvPipe);
+    cl->push_constants(shader_stage::all_compute, g_mvLayout, 0, 0, 8, &p);
+    descriptor_table_update u = {};
+    u.count = 1;
+    u.type = descriptor_type::shader_resource_view;
+    u.descriptors = &g_velSrv;
+    cl->push_descriptors(shader_stage::all_compute, g_mvLayout, 1, u);
+    u.type = descriptor_type::unordered_access_view;
+    u.descriptors = &g_mvUav;
+    cl->push_descriptors(shader_stage::all_compute, g_mvLayout, 2, u);
+    cl->dispatch((w + 7) / 8, (h + 7) / 8, 1);
+    Transition(cl, g_mv, resource_usage::shader_resource);
+    g_mvFrame = g_frame;
+    static bool logged = false;
+    if (!logged) logged = true, Log("motion vectors: the jitter is taken out (mvfix.hlsl)");
+    return true;
+}
+
 // Frame generation's inputs, at the TAA draw (whoever upscales): the depth (depth read + shader
 // resource, 0xE0), the velocity (shader resource, 0xC0; NDC offsets, y up: UV = (0.5, -0.5) x),
 // SceneInfo, jitter, camera cut.
+// Called after the upscaler (OnTaa): when it made this frame's motion vectors without the jitter
+// (g_mv, render pixels), frame generation gets those too (UV offsets = pixels / render size), as
+// DLSS-G and FSR FG want; else the game's velocity, which includes the jitter.
 void GiveFrameGen(command_list* cl, ListState& s) {
     if (!FrameGenWantsCamera()) return;
     device* dev = cl->get_device();
@@ -1254,9 +1345,19 @@ void GiveFrameGen(command_list* cl, ListState& s) {
     RenderSize(dev, color, scene, &w, &h);
     FrameGenSetSceneInfo(scene);
     constexpr unsigned kDepthRead = 0x20 | 0x40 | 0x80, kShaderResource = 0x40 | 0x80;  // D3D12 resource states
+    ID3D12Resource* mv = reinterpret_cast<ID3D12Resource*>(motion.handle);
+    float scaleX = 0.5f, scaleY = -0.5f;  // NDC offsets, y up -> UV offsets
+    if (g_set.fgMvFix && g_set.mvFix) {
+        std::lock_guard<std::mutex> lock(g_resMutex);
+        if (g_mvFrame == g_frame && g_mv.res.handle && g_mv.w == w && g_mv.h == h) {
+            mv = reinterpret_cast<ID3D12Resource*>(g_mv.res.handle);  // shader resource state after FixMotion
+            scaleX = 1.0f / w, scaleY = 1.0f / h;
+            static bool logged = false;
+            if (!logged) logged = true, Log("frame generation: motion vectors without the jitter");
+        }
+    }
     FrameGenTag(reinterpret_cast<ID3D12GraphicsCommandList*>(cl->get_native()), reinterpret_cast<ID3D12Resource*>(depth.handle),
-                kDepthRead, reinterpret_cast<ID3D12Resource*>(motion.handle), kShaderResource, w, h, JitterX(scene, w),
-                JitterY(scene, h), 0.5f, -0.5f, CameraCut(scene));
+                kDepthRead, mv, kShaderResource, w, h, JitterX(scene, w), JitterY(scene, h), scaleX, scaleY, CameraCut(scene));
 }
 
 // ---------------------------------------------------------------- the picture before the HUD
@@ -1435,89 +1536,6 @@ void Sharpen(command_list* cl, device* dev) {
     Transition(cl, g_xs, resource_usage::unordered_access);  // DLSS writes it next frame
     static bool logged = false;
     if (!logged) logged = true, Log("DLSS output sharpened (RCAS, strength %.2f)", sharpness);
-}
-
-// ---------------------------------------------------------------- motion vectors without the jitter
-//
-// The game's velocity (rgba16snorm, NDC offset to the previous position, y up) includes this
-// frame's jitter. mvfix.hlsl writes g_mv (rg16f, render pixels) = velocity * (0.5 w, -0.5 h) +
-// jitter, which DLSS, Ray Reconstruction and FSR get with a motion scale of 1. In RE3DLSS-DX11 the
-// jitter left soft striped patches on still faces at Performance. g_resMutex held.
-Texture g_mv;
-resource_view g_mvUav = {0};
-uint64_t g_mvUavOf = 0;
-resource_view g_velSrv = {0};  // our view of the game's velocity texture
-uint64_t g_velSrvOf = 0;
-pipeline_layout g_mvLayout = {0};
-pipeline g_mvPipe = {0};
-bool g_mvFailed = false;
-
-bool MvFixReady(device* dev) {
-    if (g_mvPipe.handle) return true;
-    if (g_mvFailed) return false;
-    constant_range c = {};
-    c.count = 8;
-    c.visibility = shader_stage::all_compute;
-    descriptor_range srv = {};
-    srv.count = 1;
-    srv.visibility = shader_stage::all_compute;
-    srv.type = descriptor_type::shader_resource_view;
-    descriptor_range uav = srv;
-    uav.type = descriptor_type::unordered_access_view;
-    const pipeline_layout_param params[3] = {pipeline_layout_param(c), pipeline_layout_param(srv), pipeline_layout_param(uav)};
-    shader_desc cs = {};
-    cs.code = kMvFixCs;
-    cs.code_size = sizeof(kMvFixCs);
-    pipeline_subobject sub = {pipeline_subobject_type::compute_shader, 1, &cs};
-    if (!dev->create_pipeline_layout(3, params, &g_mvLayout) || !dev->create_pipeline(g_mvLayout, 1, &sub, &g_mvPipe)) {
-        g_mvFailed = true;
-        g_mvPipe = {0};
-        Log("couldn't create the motion vector shader: the game's motion vectors are used as they are");
-        return false;
-    }
-    return true;
-}
-
-// The game's velocity -> g_mv. False: use the game's velocity as it is.
-bool FixMotion(command_list* cl, device* dev, resource velocity, uint32_t w, uint32_t h, float jitterPxX, float jitterPxY) {
-    if (!MvFixReady(dev)) return false;
-    const resource_usage usage = resource_usage::unordered_access | resource_usage::shader_resource;
-    if (!Ensure(dev, g_mv, w, h, format::r16g16_float, usage, resource_usage::unordered_access, "motion vector")) return false;
-    if (g_mvUavOf != g_mv.res.handle) {
-        if (g_mvUav.handle) dev->destroy_resource_view(g_mvUav);
-        g_mvUav = {0};
-        dev->create_resource_view(g_mv.res, resource_usage::unordered_access, resource_view_desc(format::r16g16_float), &g_mvUav);
-        g_mvUavOf = g_mv.res.handle;
-    }
-    if (g_velSrvOf != velocity.handle) {
-        if (g_velSrv.handle) dev->destroy_resource_view(g_velSrv);
-        g_velSrv = {0};
-        const format vf = format_to_default_typed(dev->get_resource_desc(velocity).texture.format);
-        dev->create_resource_view(velocity, resource_usage::shader_resource,
-                                  resource_view_desc(resource_view_type::texture_2d, vf, 0, 1, 0, 1), &g_velSrv);
-        g_velSrvOf = velocity.handle;
-    }
-    if (!g_mvUav.handle || !g_velSrv.handle) return false;
-    Transition(cl, g_mv, resource_usage::unordered_access);
-    struct {
-        float scaleX, scaleY, offsetX, offsetY;
-        uint32_t w, h, pad0, pad1;
-    } p = {0.5f * w, -0.5f * h, jitterPxX, jitterPxY, w, h, 0, 0};
-    cl->bind_pipeline(pipeline_stage::all_compute, g_mvPipe);
-    cl->push_constants(shader_stage::all_compute, g_mvLayout, 0, 0, 8, &p);
-    descriptor_table_update u = {};
-    u.count = 1;
-    u.type = descriptor_type::shader_resource_view;
-    u.descriptors = &g_velSrv;
-    cl->push_descriptors(shader_stage::all_compute, g_mvLayout, 1, u);
-    u.type = descriptor_type::unordered_access_view;
-    u.descriptors = &g_mvUav;
-    cl->push_descriptors(shader_stage::all_compute, g_mvLayout, 2, u);
-    cl->dispatch((w + 7) / 8, (h + 7) / 8, 1);
-    Transition(cl, g_mv, resource_usage::shader_resource);
-    static bool logged = false;
-    if (!logged) logged = true, Log("motion vectors: the jitter is taken out (mvfix.hlsl)");
-    return true;
 }
 
 std::atomic<float> g_renderScale{1};  // render width / output width at the last TAA (1 when not upscaling)
@@ -2275,11 +2293,14 @@ bool UpscalerOnDraw(command_list* cl, uint32_t vertices, uint32_t instances) {
         return false;
     }
     const uint32_t id = PipelinePs(s->pipe);
-    if (id == kTaaPs) GiveFrameGen(cl, *s);
+    if (id == kTaaPs) {  // the upscaler first: frame generation can then get its motion vectors
+        const bool replaced = g_set.enabled && OnTaa(cl, *s);
+        GiveFrameGen(cl, *s);
+        return replaced;
+    }
     if (id == kOutputPs) NoteOutputPass(cl, *s, vertices, instances);
     if (!g_set.enabled) return false;
     switch (id) {
-        case kTaaPs: return OnTaa(cl, *s);
         case kBloomPs: OnBloom(cl, *s); return false;
         case kTonemapPs: return OnTonemap(cl, *s);
         case kTonemapPs2: return OnTonemap(cl, *s);
@@ -2543,6 +2564,11 @@ void UpscalerOverlay() {
         changed |= ImGui::Checkbox("Motion vectors without the camera jitter", &g_set.mvFix);
         Help("The game's motion vectors include each frame's camera jitter; DLSS and FSR want them without it. "
              "With the jitter, DLSS can leave soft striped patches on still surfaces such as faces at Performance.");
+        ImGui::BeginDisabled(!g_set.mvFix);
+        changed |= ImGui::Checkbox("Frame generation uses them too", &g_set.fgMvFix);
+        ImGui::EndDisabled();
+        Help("Frame generation (DLSS-G, FSR) gets the same motion vectors without the jitter, as NVIDIA and AMD "
+             "want. Off: the game's own, with the jitter.");
         ImGui::SeparatorText("Ray Reconstruction testing");
         ImGui::SetNextItemWidth(ControlWidth() * 1.4f);
         if (ImGui::Combo("Game's ray tracing denoiser", &g_set.rrDenoise, kRrDenoiseNames, 3)) {
