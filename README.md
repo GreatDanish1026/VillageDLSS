@@ -46,10 +46,9 @@ support, and REFramework for the render resolution dropdown.
   NVIDIA's DLSS Ray Reconstruction 310.9.16 replaces DLSS Super Resolution. It upscales and cleans up
   the noise in the ray-traced lighting and reflections, with guides built from the game's
   G-buffer and camera. **Ray Reconstruction model**:
-  NVIDIA's default, D, E or F; an override in the NVIDIA App takes precedence. By default the game's
-  frame-to-frame denoising is skipped and Ray Reconstruction does it (the game's spatial passes
-  still fill in its sparse rays); the Advanced tab can keep the game's whole denoiser instead, or
-  skip all of it. Advanced also shows the surface pictures Ray
+  NVIDIA's default, D, E or F; an override in the NVIDIA App takes precedence. Ray Reconstruction works on
+  top of the game's own ray tracing denoiser; the Advanced tab can skip the game's frame-to-frame
+  denoising (noisier in this game) or all of it. Advanced also shows the surface pictures Ray
   Reconstruction gets (colour, reflectivity, normals, roughness). Without ray tracing (menus,
   some scene changes, or ray tracing off) it uses Super Resolution.
 

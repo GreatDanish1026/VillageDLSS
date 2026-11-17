@@ -209,3 +209,13 @@ docs/shaders/mv: viewProjInvMat 224 jittered, prevViewProjMat 288 not), so its v
 this frame's jitter; the game cycles 16 jitter positions. With the motion fix (mvfix.hlsl, from
 RE3DLSS-DX11 via RE2DLSS) Ray Reconstruction at Quality: "There was no flicker at all this time"
 (user). So the flicker was RR reacting to the jitter in the motion vectors, not the dithered fade.
+
+## Effect mask and Ray Reconstruction denoising (2026-11-17)
+
+Effect mask made by the add-on (Village's TAA has none): scene colour copied at the first
+colour-only draw after the lighting compose psa2c098fe (after the forward G-buffer draws), compared
+with the TAA's colour by effmask.hlsl. User: "Everything looked good" (mask view and on/off).
+
+Ray Reconstruction: RE2/RE3/RE7 now skip the game's temporal denoise passes by default (looked best
+with the motion vectors fixed), but in Village that made a lot of noise (user), so Village keeps the
+game's whole denoiser as the default (ini RrDenoise, 0).
