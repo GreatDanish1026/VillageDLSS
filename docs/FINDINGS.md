@@ -201,3 +201,11 @@ The guide view shows him flickering too. Diagnostic builds giving RR flat colour
 guides, then flat normals as well, didn't help; RR models D, E, F and default all do it. Likely
 RR's denoiser removing the game's dithered camera-near fade (not confirmed). Left as a known
 issue (README); a possible fix would be DLSS-RR's bias-current-colour mask over those pixels.
+
+## Ethan's flicker: motion vectors with the jitter (2026-11-17)
+
+Village's velocity pass is the same FillVelocityPS as RE2's DX12 build (psc303a118 dumped,
+docs/shaders/mv: viewProjInvMat 224 jittered, prevViewProjMat 288 not), so its velocity includes
+this frame's jitter; the game cycles 16 jitter positions. With the motion fix (mvfix.hlsl, from
+RE3DLSS-DX11 via RE2DLSS) Ray Reconstruction at Quality: "There was no flicker at all this time"
+(user). So the flicker was RR reacting to the jitter in the motion vectors, not the dithered fade.
