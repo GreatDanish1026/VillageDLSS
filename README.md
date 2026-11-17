@@ -1,4 +1,4 @@
-# VillageDLSS 1.3.2
+# VillageDLSS 1.3.3
 
 ReShade add-on for **Resident Evil Village** (DirectX 12) that replaces the game's TAA
 with **NVIDIA DLSS** or **AMD FSR 3.1 / FSR 4**, and adds **DLSS or FSR frame generation** and
@@ -37,6 +37,17 @@ support, and REFramework for the render resolution dropdown.
 - **Game exposure** (on by default, Advanced tab): DLSS and FSR 3.1 get the picture's real exposure (the game's colour is already exposed) instead of
   estimating it themselves: steadier brightness and less ghosting when the lighting changes. FSR 4 measures its own
   (1.3.0 gave it the game's too, which crashed games on Radeon cards).
+- **Effect mask** (on by default, Advanced tab; 1.3.3): the game's anti-aliasing has no mask for
+  particles, fire, smoke and other effects, so the add-on makes one: it compares the picture just
+  before the game draws its effects with the picture after. DLSS, Ray Reconstruction and
+  FSR then trust the current frame more there, against ghosting and smearing on effects. The
+  Advanced tab can show the mask, for testing.
+- **Motion vectors without the camera jitter** (on by default, Advanced tab; 1.3.3): the game's motion
+  vectors include each frame's camera jitter; DLSS, Ray Reconstruction, FSR and frame generation now
+  get them without it.
+  With the jitter, DLSS left soft blocky patches on still faces at Performance, and Ray Reconstruction
+  made Ethan's head and hands flicker.
+  A second switch keeps frame generation on the game's own motion vectors.
 - **Full-resolution reflections** (off by default, Settings tab): the bundled REFramework script
   makes the game ray trace its reflections at the full render resolution instead of a reduced one:
   sharper reflections, especially with Ray Reconstruction, at a GPU cost. (Resident Evil Village may ignore this setting.)
@@ -57,7 +68,7 @@ Settings, Status and Advanced tabs. They're saved in `ReShade.ini` under `[Villa
 
 ## Install
 
-**With Fluffy Mod Manager**: put `VillageDLSS-1.3.2.zip` in Fluffy Mod Manager's `Games\RE8\Mods`
+**With Fluffy Mod Manager**: put `VillageDLSS-1.3.3.zip` in Fluffy Mod Manager's `Games\RE8\Mods`
 folder (or drag it onto the manager) and enable it. It installs into the game folder:
 
 - `VillageDLSS.addon64` (the add-on), `nvngx_dlss.dll` and `nvngx_dlssd.dll` (NVIDIA's DLSS and
@@ -90,10 +101,6 @@ If the NVIDIA App has a DLSS model override for the game, it takes precedence ov
   upscaled render resolution down to Ultra Performance, with the same tone as DLAA, and DLSS frame
   generation 2x in exclusive full screen; Ray Reconstruction at DLAA and Quality with ray tracing on.
   FSR and FSR frame generation are the same code as RE7DLSS 1.1.1, where they were tested.
-- Known issue: with Ray Reconstruction on, parts of Ethan (his head and hands) can flicker in and
-  out. Plain DLSS doesn't do it, and no Ray Reconstruction model avoids it; it seems to be how
-  Ray Reconstruction treats the way the game fades him when the camera is close. Turn Ray
-  Reconstruction off if it bothers you.
 - Works with REFramework: REFramework hooks NVIDIA's frame generation DLL in a way that would hang
   the game at launch; the add-on steps around that hook while the game's swapchain is created.
 - FSR 3.1/4 and FSR frame generation through this add-on are untested on Radeon cards so far.
