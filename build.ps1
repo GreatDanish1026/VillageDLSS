@@ -38,6 +38,7 @@ $cmd = @(
     "fxc /nologo /T cs_5_1 /E main /O3 /Vn kGuideViewCs /Fh `"$obj\guide_view_cs.h`" `"$root\src\guide_view.hlsl`" >nul",
     "fxc /nologo /T cs_5_1 /E main /O3 /Vn kRcasCs /Fh `"$obj\rcas_cs.h`" `"$root\src\rcas.hlsl`" >nul",
     "fxc /nologo /T cs_5_1 /E main /O3 /Vn kMvFixCs /Fh `"$obj\mvfix_cs.h`" `"$root\src\mvfix.hlsl`" >nul",
+    "fxc /nologo /T cs_5_1 /E main /O3 /Vn kEffMaskCs /Fh `"$obj\effmask_cs.h`" `"$root\src\effmask.hlsl`" >nul",
     ("cl /nologo /std:c++17 /O2 /EHsc /MT /W3 /D_CRT_SECURE_NO_WARNINGS /DNOMINMAX " +
      "/I `"$obj`" /I `"$root\third_party\imgui`" /I `"$root\third_party\reshade\include`" /I `"$root\third_party\dlss\include`" " +
      "/I `"$root\third_party\streamline\include`" " +
