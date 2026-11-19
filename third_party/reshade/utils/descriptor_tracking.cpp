@@ -106,6 +106,22 @@ void descriptor_tracking::register_pipeline_layout(pipeline_layout layout, uint3
 			layout_data.params[i].descriptor_table.count = n;
 			layout_data.params[i].descriptor_table.ranges = layout_data.ranges[i].data();
 		}
+		else if (params[i].type == pipeline_layout_param_type::push_descriptors_with_ranges_and_flags)
+		{
+			if (params[i].descriptor_table_with_flags.count > 0 && params[i].descriptor_table_with_flags.ranges != nullptr)
+			{
+				layout_data.params[i].push_descriptors = params[i].descriptor_table_with_flags.ranges[0];
+				layout_data.params[i].type = pipeline_layout_param_type::push_descriptors;
+			}
+		}
+		else if (params[i].type == pipeline_layout_param_type::push_descriptors_with_ranges)
+		{
+			if (params[i].descriptor_table.count > 0 && params[i].descriptor_table.ranges != nullptr)
+			{
+				layout_data.params[i].push_descriptors = params[i].descriptor_table.ranges[0];
+				layout_data.params[i].type = pipeline_layout_param_type::push_descriptors;
+			}
+		}
 	}
 }
 void descriptor_tracking::unregister_pipeline_layout(pipeline_layout layout)

@@ -219,3 +219,10 @@ with the TAA's colour by effmask.hlsl. User: "Everything looked good" (mask view
 Ray Reconstruction: RE2/RE3/RE7 now skip the game's temporal denoise passes by default (looked best
 with the motion vectors fixed), but in Village that made a lot of noise (user), so Village keeps the
 game's whole denoiser as the default (ini RrDenoise, 0).
+
+## AMD Radeon: camera constants (2026-11-19, from RE7DLSS pull request #3)
+
+Ported from RE7DLSS (merge 731079c): buffers are mapped by their D3D12 heap properties (ReBAR / Smart
+Access Memory GPU-upload heaps count as CPU-readable), a CBV b0 bound through a descriptor table is
+found too, copies into GPU-only constant buffers keep their bytes once tracking starts, and only the
+pass's own SceneInfo is used (no older frame, no compute bindings). Not tested on Radeon by us.
