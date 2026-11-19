@@ -1,4 +1,4 @@
-# VillageDLSS 1.3.3
+# VillageDLSS 1.3.4
 
 ReShade add-on for **Resident Evil Village** (DirectX 12) that replaces the game's TAA
 with **NVIDIA DLSS** or **AMD FSR 3.1 / FSR 4**, and adds **DLSS or FSR frame generation** and
@@ -68,7 +68,7 @@ Settings, Status and Advanced tabs. They're saved in `ReShade.ini` under `[Villa
 
 ## Install
 
-**With Fluffy Mod Manager**: put `VillageDLSS-1.3.3.zip` in Fluffy Mod Manager's `Games\RE8\Mods`
+**With Fluffy Mod Manager**: put `VillageDLSS-1.3.4.zip` in Fluffy Mod Manager's `Games\RE8\Mods`
 folder (or drag it onto the manager) and enable it. It installs into the game folder:
 
 - `VillageDLSS.addon64` (the add-on), `nvngx_dlss.dll` and `nvngx_dlssd.dll` (NVIDIA's DLSS and
@@ -104,6 +104,7 @@ If the NVIDIA App has a DLSS model override for the game, it takes precedence ov
 - Works with REFramework: REFramework hooks NVIDIA's frame generation DLL in a way that would hang
   the game at launch; the add-on steps around that hook while the game's swapchain is created.
 - FSR 3.1/4 and FSR frame generation through this add-on are untested on Radeon cards so far.
+- AMD Radeon (DirectX 12): 1.3.4 finds the camera constants on Radeon systems too (fix contributed by a Radeon user, RE7DLSS pull request #3); before, some Radeon systems reported "camera constants (SceneInfo) not found" and the add-on stayed off. Not tested on Radeon here.
 - A few frames during loading may show the game's own upscaling; that's expected.
 - The render scale the dropdown sets is the game's Image Quality setting, so the game saves it in
   `config.ini`. With upscaling off (F9) or the dropdown on "Game's Image Quality slider", the
