@@ -26,6 +26,7 @@ $vcvars = Join-Path $vs "VC\Auxiliary\Build\vcvars64.bat"
 $obj = "$root\bin\obj"
 New-Item -ItemType Directory -Force $obj | Out-Null
 $addon = "$root\bin\VillageDLSS.addon64"
+$plugin = "$root\bin\VillageDLSS_Reflex.dll"
 
 # ReShade add-on headers in third_party\reshade match ReShade 6.8.0.
 $cmd = @(
@@ -46,7 +47,10 @@ $cmd = @(
      "/Fo`"$obj\\`" `"$root\src\main.cpp`" `"$root\src\upscaler.cpp`" `"$root\src\dlss.cpp`" `"$root\src\fsr.cpp`" " +
      "`"$root\src\framegen.cpp`" `"$root\src\fsrfg.cpp`" `"$root\third_party\reshade\utils\descriptor_tracking.cpp`" " +
      "user32.lib advapi32.lib ole32.lib d3d12.lib dxgi.lib `"$root\third_party\dlss\lib\nvsdk_ngx_s.lib`" " +
-     "/link /DLL /OUT:`"$addon`" /PDB:`"$obj\VillageDLSS.pdb`" /DEBUG")
+     "/link /DLL /OUT:`"$addon`" /PDB:`"$obj\VillageDLSS.pdb`" /DEBUG"),
+    # VillageDLSS_Reflex.dll: REFramework plugin telling the add-on when the game's frame starts (Reflex at input).
+    ("cl /nologo /std:c++17 /O2 /MT /W3 /I `"$root\src`" /Fo`"$obj\\`" `"$root\src\refplugin.cpp`" " +
+     "/link /DLL /OUT:`"$plugin`" /PDB:`"$obj\VillageDLSS_Reflex.pdb`" /DEBUG")
 ) -join " && "
 cmd /c $cmd
 if ($LASTEXITCODE) { throw "build failed" }
@@ -88,6 +92,8 @@ if ($Install) {
     if (Test-Path "$GameDir\reframework") {
         New-Item -ItemType Directory -Force "$GameDir\reframework\autorun" | Out-Null
         Copy-Item "$root\reframework\VillageDLSS.lua" "$GameDir\reframework\autorun" -Force
+        New-Item -ItemType Directory -Force "$GameDir\reframework\plugins" | Out-Null
+        Copy-Item $plugin "$GameDir\reframework\plugins" -Force
     } else { Write-Warning "REFramework not installed: the render resolution dropdown needs it" }
     Write-Host "Installed to $GameDir"
 }
@@ -102,6 +108,8 @@ if ($Package) {
     # Files installed into the game folder (where re8.exe is).
     Copy-Runtime $mod
     Copy-Item "$root\reframework\VillageDLSS.lua" "$mod\reframework\autorun"
+    New-Item -ItemType Directory -Force "$mod\reframework\plugins" | Out-Null
+    Copy-Item $plugin "$mod\reframework\plugins"
     Copy-Item "$root\README.md" "$mod\VillageDLSS-README.md"
     Copy-Item "$root\THIRD_PARTY_NOTICES.txt" "$mod\VillageDLSS-THIRD_PARTY_NOTICES.txt"
     Copy-Item "$root\LICENSE" "$mod\VillageDLSS-licenses\VillageDLSS-LICENSE.txt"
