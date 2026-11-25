@@ -479,6 +479,7 @@ void BeforePresentFsr() {
 
 void LatencyTick();  // latency measurement, below
 bool RefFrames();  // below
+double TakeInputLead();  // below: average time from the game's input read to the render thread's frame start
 
 void BeforePresent() {
     std::lock_guard<std::recursive_mutex> lock(g_mutex);
@@ -581,11 +582,17 @@ void LatencyTick() {
     }
     const double frameMs = TicksMs(g_frameTicks, g_latFrames - 1);
     const double gameWait = TicksMs(g_gameSleepTicks.exchange(0), g_latFrames);
+    // With the wait on the render thread, Reflex's report starts at the render thread's frame start:
+    // the game thread read that frame's input earlier (about a frame in RE4), so that lead is added.
+    const double lead = TakeInputLead();
+    const bool addLead = !g_gameReflexOn && lead > 0;
+    char split[96] = "";
+    if (addLead) snprintf(split, sizeof(split), " = input read %.1f ms before the frame start + %.1f", lead, simToGpu.Ms());
     Log("latency: %.0f fps (%.2f ms), Reflex %s waits %.2f ms/frame on the %s thread (frame starts from %s), input -> "
-        "GPU done %.1f ms (GPU %.1f ms), frame generation %s, scope view in %llu of %u frames",
+        "GPU done %.1f ms%s (GPU %.1f ms), frame generation %s, scope view in %llu of %u frames",
         frameMs > 0 ? 1000.0 / frameMs : 0.0, frameMs, kReflexNames[g_set.reflex], g_gameReflexOn ? gameWait : TicksMs(g_sleepTicks, g_latFrames),
         g_gameReflexOn ? "game" : "render", RefFrames() ? "REFramework's input update" : g_gameReflexOn ? "the controller poll" : "the render thread",
-        simToGpu.Ms(), gpu.Ms(), kModeNames[g_appliedMode >= 0 ? g_appliedMode : kOff],
+        simToGpu.Ms() + (addLead ? lead : 0.0), split, gpu.Ms(), kModeNames[g_appliedMode >= 0 ? g_appliedMode : kOff],
         static_cast<unsigned long long>(g_scopedFrames), g_latFrames);
     (void)renderToGpu, (void)submit, (void)present, (void)queue, (void)inputToGpu, (void)reports, (void)gpuFrame, (void)gpuActive;
     g_latFrames = 0, g_sleepTicks = 0, g_frameTicks = 0, g_scopedFrames = 0;
@@ -711,6 +718,15 @@ void InstallInputProbe() {
 // The add-on is unloading: the imports point back at the originals.
 void RemoveInputProbe() {
     if (g_origXInputGetState) PatchImport("XINPUT1_4.dll", nullptr, 2, reinterpret_cast<void*>(g_origXInputGetState), nullptr);
+}
+
+// The average of (render thread frame start - the game's last input read before it) since the last
+// call (the latency line), then reset.
+double TakeInputLead() {
+    const double lead = g_probeFramesWithPoll ? g_probeLeadMs / g_probeFramesWithPoll : 0.0;
+    g_probeFrames = g_probeFramesWithPoll = g_probePolls = 0;
+    g_probeLeadMs = 0;
+    return lead;
 }
 
 // At each frame start on the render thread (after Reflex's wait): the polls since the last one.
