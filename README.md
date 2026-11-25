@@ -1,4 +1,4 @@
-# VillageDLSS 1.3.4
+# VillageDLSS 1.3.5
 
 ReShade add-on for **Resident Evil Village** (DirectX 12) that replaces the game's TAA
 with **NVIDIA DLSS** or **AMD FSR 3.1 / FSR 4**, and adds **DLSS or FSR frame generation** and
@@ -31,6 +31,11 @@ support, and REFramework for the render resolution dropdown.
   game's own TAA), and gets the picture without the HUD so the HUD doesn't warp. Exclusive full
   screen works. Switching it on, or between DLSS and FSR, takes a game
   restart.
+- **Lower latency with DLSS frame generation** (1.3.5): Reflex's wait now happens right before
+  the game reads input (keyboard and mouse, controllers), through the bundled VillageDLSS_Reflex plugin
+  for REFramework, instead of after the game had already read the frame's input. In testing it
+  cut the time from input to the finished frame from about 25 ms to about 15 ms (frame generation 2x)
+  at the same frame rate. **NVIDIA Reflex**: On, or On + Boost (keeps the GPU's clocks up).
 - **Sharper textures at lower render sizes** (on by default): a mip bias of log2(render scale) on
   the game's material textures, as NVIDIA recommends. It follows the render resolution as it changes, without a restart.
 - **DLSS model**: Automatic (default: K, M at Performance, L at Ultra Performance, as NVIDIA recommends), or K, J, L or M (DLSS 4.5) at every resolution, or NVIDIA's default.
@@ -68,7 +73,7 @@ Settings, Status and Advanced tabs. They're saved in `ReShade.ini` under `[Villa
 
 ## Install
 
-**With Fluffy Mod Manager**: put `VillageDLSS-1.3.4.zip` in Fluffy Mod Manager's `Games\RE8\Mods`
+**With Fluffy Mod Manager**: put `VillageDLSS-1.3.5.zip` in Fluffy Mod Manager's `Games\RE8\Mods`
 folder (or drag it onto the manager) and enable it. It installs into the game folder:
 
 - `VillageDLSS.addon64` (the add-on), `nvngx_dlss.dll` and `nvngx_dlssd.dll` (NVIDIA's DLSS and
@@ -78,6 +83,8 @@ folder (or drag it onto the manager) and enable it. It installs into the game fo
 - `amd_fidelityfx_loader_dx12.dll`, `amd_fidelityfx_upscaler_dx12.dll` and
   `amd_fidelityfx_framegeneration_dx12.dll` (AMD's FSR runtime, SDK 2.4.0)
 - `reframework\autorun\VillageDLSS.lua` (sets the render scale for the render resolution dropdown)
+- `reframework\plugins\VillageDLSS_Reflex.dll` (tells the add-on when the game reads input, for
+  Reflex with DLSS frame generation)
 - `VillageDLSS-README.md`, `VillageDLSS-THIRD_PARTY_NOTICES.txt`, `VillageDLSS-licenses\`
 
 **By hand**: copy the contents of the zip's `VillageDLSS` folder into the game folder (where
@@ -88,6 +95,8 @@ Then:
 1. ReShade 6.8 or later with full add-on support must be installed for `re8.exe` (DirectX 12).
 2. REFramework must be installed for the render resolution dropdown (without it, use the game's
    Image Quality slider: 0.67 = Quality, 0.58 = Balanced, 0.5 = Performance).
+   REFramework also gives Reflex its lower-latency timing (without it, Reflex works as before
+   1.3.5).
 3. In the game, keep Anti-Aliasing on TAA (DLSS/FSR replace that pass) and FidelityFX Super
    Resolution off.
 4. Open ReShade (Home), Add-ons tab, VillageDLSS: upscaling is on by default (DLSS on RTX cards, FSR
